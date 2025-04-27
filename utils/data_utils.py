@@ -34,12 +34,12 @@ def padding(data, begin_token='', end_token='-', lim=48):
         padded.append(temp)
     return padded
 
-def onehot_encoding(data, alphabet='BCDSQKIPTFNGHLRWAVEYM-'):
+def onehot_encoding(data, alphabet='ACDEFGHIKLMNPQRSTVWY'):
     """One-hot encoding of protein sequences
 
     Args:
         data (list): List of sequence strings to encode dim:(N, sequence length)
-        alphabet (string, optional): The alphabet to use. Defaults to 'BCDSQKIPTFNGHLRWAVEYM-'.
+        alphabet (string, optional): The alphabet to use. Defaults to 'ACDEFGHIKLMNPQRSTVWY'.
 
     Returns:
         list: List of encoded sequences dim:(N, sequence length, alphabet length)
@@ -58,12 +58,12 @@ def onehot_encoding(data, alphabet='BCDSQKIPTFNGHLRWAVEYM-'):
         onehot_encoded.append(temp)
     return onehot_encoded
 
-def onehot_decoding(data, alphabet='BCDSQKIPTFNGHLRWAVEYM-'):
+def onehot_decoding(data, alphabet='ACDEFGHIKLMNPQRSTVWY'):
     """One-hot decoding of protein sequences
 
     Args:
         data (list):  List of one-hot encoded sequences dim:(N, sequence length, alphabet length)
-        alphabet (_type_, optional): The alphabet to use. Defaults to 'BCDSQKIPTFNGHLRWAVEYM-'.
+        alphabet (_type_, optional): The alphabet to use. Defaults to 'ACDEFGHIKLMNPQRSTVWY'.
 
     Returns:
         list: List of decoded sequences as strings. dim:(N, sequence length) 
