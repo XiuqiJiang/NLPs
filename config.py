@@ -1,0 +1,20 @@
+# 数据参数
+DATA_PATH = 'data/raw/nlp_sequences.txt'
+MAX_SEQUENCE_LENGTH = 48
+ALPHABET = 'BCDSQKIPTFNGHLRWAVEYM-'
+
+# 模型参数
+LATENT_DIM = 50
+HIDDEN_DIM = 256
+INPUT_SHAPE = (MAX_SEQUENCE_LENGTH, len(ALPHABET))
+OUTPUT_SHAPE = (MAX_SEQUENCE_LENGTH, len(ALPHABET))
+
+# 训练参数
+EPOCHS = 100
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+
+# 生成参数
+NUM_SAMPLES = 10
+MODEL_WEIGHTS_PATH = 'models/vae/weights/epoch_100.h5'
+GENERATED_SEQUENCES_PATH = 'data/processed/generated_sequences.txt' 
