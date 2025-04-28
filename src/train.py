@@ -12,6 +12,7 @@ from config.data_config import *
 from models.vae import ESMVAE, vae_loss
 from utils.data_utils import load_sequences, create_data_loaders
 from utils.model_utils import EarlyStopping, save_checkpoint
+from utils.trainer import VAETrainer
 
 # 设置日志
 def setup_logging() -> None:
@@ -162,66 +163,22 @@ def main() -> None:
     # 优化器
     optimizer = torch.optim.Adam(model.parameters(), lr=VAE_LEARNING_RATE)
     
-    # 学习率调度器
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer,
-        **LEARNING_RATE_SCHEDULER
+    # 创建训练器
+    trainer = VAETrainer(
+        model=model,
+        optimizer=optimizer,
+        device=device,
+        model_save_dir=MODEL_SAVE_DIR,
+        log_dir=LOG_DIR,
+        log_level=LOG_LEVEL
     )
     
-    # 早停
-    early_stopping = EarlyStopping(
-        patience=EARLY_STOPPING_PATIENCE,
-        verbose=True
+    # 开始训练
+    trainer.train(
+        train_loader=train_loader,
+        val_loader=val_loader,
+        num_epochs=VAE_EPOCHS
     )
-    
-    # 训练循环
-    best_val_loss = float('inf')
-    for epoch in range(1, VAE_EPOCHS + 1):
-        # 训练
-        train_metrics = train_epoch(model, train_loader, optimizer, device, epoch)
-        
-        # 验证
-        val_metrics = validate(model, val_loader, device)
-        
-        # 更新学习率
-        scheduler.step(val_metrics['loss'])
-        
-        # 打印指标
-        logging.info(
-            f'Epoch {epoch}: '
-            f'Train Loss: {train_metrics["loss"]:.6f}, '
-            f'Val Loss: {val_metrics["loss"]:.6f}'
-        )
-        
-        # 保存检查点
-        if epoch % MODEL_SAVE_FREQUENCY == 0:
-            save_checkpoint(
-                model,
-                optimizer,
-                epoch,
-                val_metrics['loss'],
-                MODEL_SAVE_DIR
-            )
-        
-        # 早停检查
-        early_stopping(val_metrics['loss'])
-        if early_stopping.early_stop:
-            logging.info("早停触发")
-            break
-        
-        # 更新最佳模型
-        if val_metrics['loss'] < best_val_loss:
-            best_val_loss = val_metrics['loss']
-            save_checkpoint(
-                model,
-                optimizer,
-                epoch,
-                val_metrics['loss'],
-                MODEL_SAVE_DIR,
-                is_best=True
-            )
-    
-    logging.info("训练完成")
 
 if __name__ == '__main__':
     main() 
