@@ -1,10 +1,40 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForMaskedLM
-from config.config import *
+from typing import Tuple, Optional
+from config.model_config import (
+    ESM_MODEL_NAME,
+    LATENT_DIM,
+    HIDDEN_DIM,
+    ALPHABET
+)
 
 class ESMVAE(nn.Module):
-    def __init__(self, esm_model_name=ESM_MODEL_NAME, latent_dim=LATENT_DIM, hidden_dim=HIDDEN_DIM):
+    """基于ESM的变分自编码器模型
+    
+    使用预训练的ESM模型作为编码器，实现蛋白质序列的变分自编码。
+    
+    Attributes:
+        esm: 预训练的ESM模型
+        encoder_mean: 编码器均值层
+        encoder_logvar: 编码器方差层
+        decoder: 解码器网络
+        output_layer: 输出层
+    """
+    
+    def __init__(
+        self,
+        esm_model_name: str = ESM_MODEL_NAME,
+        latent_dim: int = LATENT_DIM,
+        hidden_dim: int = HIDDEN_DIM
+    ) -> None:
+        """初始化ESMVAE模型
+        
+        Args:
+            esm_model_name: ESM模型名称
+            latent_dim: 潜在空间维度
+            hidden_dim: 隐藏层维度
+        """
         super(ESMVAE, self).__init__()
         
         # 加载预训练的ESM模型作为编码器
@@ -28,7 +58,15 @@ class ESMVAE(nn.Module):
         # 最终输出层
         self.output_layer = nn.Linear(esm_hidden_dim, len(ALPHABET))
         
-    def encode(self, x):
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """编码输入序列
+        
+        Args:
+            x: 输入序列张量
+            
+        Returns:
+            潜在空间的均值和方差
+        """
         # 使用ESM获取序列表示
         esm_outputs = self.esm(x, output_hidden_states=True)
         hidden_states = esm_outputs.hidden_states[-1]  # 使用最后一层隐藏状态
@@ -39,22 +77,72 @@ class ESMVAE(nn.Module):
         logvar = self.encoder_logvar(pooled)
         return mean, logvar
     
-    def reparameterize(self, mean, logvar):
+    def reparameterize(
+        self,
+        mean: torch.Tensor,
+        logvar: torch.Tensor
+    ) -> torch.Tensor:
+        """重参数化技巧
+        
+        Args:
+            mean: 均值
+            logvar: 对数方差
+            
+        Returns:
+            采样得到的潜在向量
+        """
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
         return mean + eps * std
     
-    def decode(self, z):
+    def decode(self, z: torch.Tensor) -> torch.Tensor:
+        """解码潜在向量
+        
+        Args:
+            z: 潜在向量
+            
+        Returns:
+            重建的序列logits
+        """
         h = self.decoder(z)
         logits = self.output_layer(h)
         return logits
     
-    def forward(self, x):
+    def forward(
+        self,
+        x: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """前向传播
+        
+        Args:
+            x: 输入序列张量
+            
+        Returns:
+            重建序列logits、均值和方差
+        """
         mean, logvar = self.encode(x)
         z = self.reparameterize(mean, logvar)
         return self.decode(z), mean, logvar
 
-def vae_loss(recon_x, x, mean, logvar, kl_weight=KL_WEIGHT):
+def vae_loss(
+    recon_x: torch.Tensor,
+    x: torch.Tensor,
+    mean: torch.Tensor,
+    logvar: torch.Tensor,
+    kl_weight: float = 0.1
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """计算VAE损失
+    
+    Args:
+        recon_x: 重建序列logits
+        x: 原始序列
+        mean: 潜在空间均值
+        logvar: 潜在空间对数方差
+        kl_weight: KL散度权重
+        
+    Returns:
+        总损失、重建损失和KL散度
+    """
     # 重建损失
     recon_loss = nn.CrossEntropyLoss()(recon_x, x)
     
