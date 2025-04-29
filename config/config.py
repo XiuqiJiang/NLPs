@@ -1,10 +1,10 @@
 # 数据参数
 DATA_PATH = 'data/raw/NLP_sequences_no cesin.txt'
-MAX_SEQUENCE_LENGTH = 48
+MAX_SEQUENCE_LENGTH = 64
 ALPHABET = 'ACDEFGHIKLMNPQRSTVWY'
 
 # ESM模型参数
-ESM_MODEL_NAME = "facebook/esm2_t30_150M_UR50D"
+ESM_MODEL_NAME = "esm_model"  # 修改为本地模型路径
 ESM_OUTPUT_DIR = "results/models/esm_finetuned"
 ESM_FINETUNE_EPOCHS = 6
 ESM_BATCH_SIZE = 16

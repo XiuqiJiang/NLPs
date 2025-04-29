@@ -6,7 +6,7 @@ import time
 import logging
 import traceback
 from datetime import datetime
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, AutoModelForMaskedLM
 from config.config import *
 from models.vae import ESMVAE
 
@@ -45,6 +45,7 @@ def log_config_info():
     logging.info(f"MAX_SEQUENCE_LENGTH: {MAX_SEQUENCE_LENGTH}")
     logging.info(f"MODEL_WEIGHTS_PATH: {MODEL_WEIGHTS_PATH}")
     logging.info(f"GENERATED_SEQUENCES_PATH: {GENERATED_SEQUENCES_PATH}")
+    logging.info(f"ESM_MODEL_NAME: {ESM_MODEL_NAME}")
 
 def evaluate_sequences(sequences):
     """评估生成的序列"""
@@ -144,14 +145,15 @@ def main():
         np.random.seed(RANDOM_SEED)
         logging.info(f"设置随机种子: {RANDOM_SEED}")
         
-        # 加载tokenizer
-        logging.info(f"加载tokenizer: {ESM_MODEL_NAME}")
+        # 加载本地ESM模型和tokenizer
+        logging.info(f"加载本地ESM模型: {ESM_MODEL_NAME}")
+        esm_model = AutoModelForMaskedLM.from_pretrained(ESM_MODEL_NAME)
         tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME)
         
-        # 初始化模型
+        # 初始化VAE模型
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         logging.info(f"使用设备: {device}")
-        model = ESMVAE().to(device)
+        model = ESMVAE(esm_model=esm_model).to(device)
         
         # 加载模型权重
         if not os.path.exists(MODEL_WEIGHTS_PATH):

@@ -24,6 +24,7 @@ class ESMVAE(nn.Module):
     
     def __init__(
         self,
+        esm_model: Optional[AutoModelForMaskedLM] = None,
         esm_model_name: str = ESM_MODEL_NAME,
         latent_dim: int = LATENT_DIM,
         hidden_dim: int = HIDDEN_DIM
@@ -31,14 +32,18 @@ class ESMVAE(nn.Module):
         """初始化ESMVAE模型
         
         Args:
-            esm_model_name: ESM模型名称
+            esm_model: 预加载的ESM模型，如果为None则从esm_model_name加载
+            esm_model_name: ESM模型名称或路径
             latent_dim: 潜在空间维度
             hidden_dim: 隐藏层维度
         """
         super(ESMVAE, self).__init__()
         
-        # 加载预训练的ESM模型作为编码器
-        self.esm = AutoModelForMaskedLM.from_pretrained(esm_model_name)
+        # 加载或使用预加载的ESM模型
+        if esm_model is None:
+            self.esm = AutoModelForMaskedLM.from_pretrained(esm_model_name)
+        else:
+            self.esm = esm_model
         
         # 获取ESM的隐藏层维度
         esm_hidden_dim = self.esm.config.hidden_size
