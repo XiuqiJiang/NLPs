@@ -45,4 +45,4 @@ logs/
 
 # OS
 .DS_Store
-Thumbs.db 
+Thumbs.db esm_model/model.safetensors
