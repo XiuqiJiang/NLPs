@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoModelForMaskedLM
 from typing import Tuple, Optional
-from config.model_config import (
+from config.config import (
     ESM_MODEL_NAME,
     LATENT_DIM,
     HIDDEN_DIM,
@@ -75,7 +75,12 @@ class ESMVAE(nn.Module):
         # 使用ESM获取序列表示
         esm_outputs = self.esm(x, output_hidden_states=True)
         hidden_states = esm_outputs.hidden_states[-1]  # 使用最后一层隐藏状态
-        pooled = hidden_states.mean(dim=1)  # 池化操作
+        
+        # 确保hidden_states的维度正确
+        if len(hidden_states.shape) == 3:  # [batch_size, seq_len, hidden_dim]
+            pooled = hidden_states.mean(dim=1)  # 池化操作 [batch_size, hidden_dim]
+        else:
+            pooled = hidden_states  # 已经是[batch_size, hidden_dim]
         
         # 计算均值和方差
         mean = self.encoder_mean(pooled)

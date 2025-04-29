@@ -145,6 +145,10 @@ def main():
         np.random.seed(RANDOM_SEED)
         logging.info(f"设置随机种子: {RANDOM_SEED}")
         
+        # 检查ESM模型路径
+        if not os.path.exists(ESM_MODEL_NAME):
+            raise FileNotFoundError(f"找不到ESM模型: {ESM_MODEL_NAME}")
+        
         # 加载本地ESM模型和tokenizer
         logging.info(f"加载本地ESM模型: {ESM_MODEL_NAME}")
         esm_model = AutoModelForMaskedLM.from_pretrained(ESM_MODEL_NAME)
@@ -155,11 +159,13 @@ def main():
         logging.info(f"使用设备: {device}")
         model = ESMVAE(esm_model=esm_model).to(device)
         
-        # 加载模型权重
+        # 检查并加载模型权重
         if not os.path.exists(MODEL_WEIGHTS_PATH):
-            raise FileNotFoundError(f"找不到模型权重文件: {MODEL_WEIGHTS_PATH}")
-        logging.info(f"加载模型权重: {MODEL_WEIGHTS_PATH}")
-        model.load_state_dict(torch.load(MODEL_WEIGHTS_PATH))
+            logging.warning(f"找不到模型权重文件: {MODEL_WEIGHTS_PATH}")
+            logging.info("使用随机初始化的权重")
+        else:
+            logging.info(f"加载模型权重: {MODEL_WEIGHTS_PATH}")
+            model.load_state_dict(torch.load(MODEL_WEIGHTS_PATH))
         
         # 生成序列
         sequences = generate_sequences(
