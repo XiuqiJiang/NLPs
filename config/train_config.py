@@ -1,3 +1,5 @@
+import torch
+
 # 训练参数
 TRAIN_TEST_SPLIT = 0.15
 RANDOM_SEED = 42
@@ -6,14 +8,6 @@ BATCH_SIZE = 32
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 GRADIENT_CLIPPING = 1.0
 METRICS = ['loss', 'recon_loss', 'kl_loss']
-
-# 学习率调度器
-LEARNING_RATE_SCHEDULER = {
-    'type': 'ReduceLROnPlateau',
-    'patience': 5,
-    'factor': 0.5,
-    'min_lr': 1e-6
-}
 
 # 模型保存参数
 MODEL_SAVE_DIR = 'results/models/vae/weights'

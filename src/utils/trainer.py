@@ -4,15 +4,16 @@ from tqdm import tqdm
 import os
 import logging
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from transformers import AutoTokenizer
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.data import DataLoader
 
 from config.model_config import *
 from config.train_config import *
 from config.data_config import *
-from models.vae import ESMVAE, vae_loss
-from utils.data_utils import load_sequences, create_data_loaders
+from src.models.vae import ESMVAE, vae_loss
+from src.utils.data_utils import load_sequences, create_data_loaders
 
 class EarlyStopping:
     """早停机制"""
@@ -77,12 +78,6 @@ class VAETrainer:
         # 设置日志
         self.setup_logging(log_level)
         
-        # 初始化学习率调度器
-        self.scheduler = ReduceLROnPlateau(
-            optimizer,
-            **LEARNING_RATE_SCHEDULER
-        )
-        
         # 初始化早停
         self.early_stopping = EarlyStopping(
             patience=EARLY_STOPPING_PATIENCE,
@@ -108,16 +103,11 @@ class VAETrainer:
             ]
         )
     
-    def train_epoch(
-        self,
-        train_loader: torch.utils.data.DataLoader,
-        epoch: int
-    ) -> Dict[str, float]:
+    def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """训练一个epoch
         
         Args:
             train_loader: 训练数据加载器
-            epoch: 当前epoch
             
         Returns:
             训练指标
@@ -126,32 +116,32 @@ class VAETrainer:
         total_loss = 0
         total_recon_loss = 0
         total_kl_loss = 0
+        num_batches = 0
         
-        for batch_idx, (data, _) in enumerate(train_loader):
-            data = data.to(self.device)
+        for batch in train_loader:
+            # 前向传播
+            outputs = self.model(batch)
+            
+            # 计算损失
+            loss = outputs['loss']
+            recon_loss = outputs['recon_loss']
+            kl_loss = outputs['kl_loss']
+            
+            # 反向传播
             self.optimizer.zero_grad()
-            
-            recon_batch, mean, logvar = self.model(data)
-            loss, recon_loss, kl_loss = vae_loss(
-                recon_batch, data, mean, logvar, KL_WEIGHT
-            )
-            
             loss.backward()
             self.optimizer.step()
             
+            # 累加损失
             total_loss += loss.item()
             total_recon_loss += recon_loss.item()
             total_kl_loss += kl_loss.item()
-            
-            if batch_idx % 100 == 0:
-                logging.info(
-                    f'Train Epoch: {epoch} [{batch_idx}/{len(train_loader)}] '
-                    f'Loss: {loss.item():.6f}'
-                )
+            num_batches += 1
         
-        avg_loss = total_loss / len(train_loader)
-        avg_recon_loss = total_recon_loss / len(train_loader)
-        avg_kl_loss = total_kl_loss / len(train_loader)
+        # 计算平均损失
+        avg_loss = total_loss / num_batches
+        avg_recon_loss = total_recon_loss / num_batches
+        avg_kl_loss = total_kl_loss / num_batches
         
         return {
             'loss': avg_loss,
@@ -227,50 +217,53 @@ class VAETrainer:
     
     def train(
         self,
-        train_loader: torch.utils.data.DataLoader,
-        val_loader: torch.utils.data.DataLoader,
-        num_epochs: int = VAE_EPOCHS
-    ) -> None:
+        train_loader: DataLoader,
+        val_loader: DataLoader,
+        num_epochs: int = NUM_EPOCHS,
+        save_every: int = SAVE_EVERY
+    ) -> Dict[str, List[float]]:
         """训练模型
         
         Args:
             train_loader: 训练数据加载器
             val_loader: 验证数据加载器
             num_epochs: 训练轮数
+            save_every: 每隔多少轮保存一次模型
+            
+        Returns:
+            训练过程中的指标记录
         """
-        logging.info("开始训练...")
+        self.logger.info("开始训练...")
+        
+        # 初始化指标记录
+        metrics_history = {
+            'train_loss': [],
+            'val_loss': [],
+            'train_recon_loss': [],
+            'train_kl_loss': [],
+            'val_recon_loss': [],
+            'val_kl_loss': []
+        }
         
         for epoch in range(1, num_epochs + 1):
             # 训练
-            train_metrics = self.train_epoch(train_loader, epoch)
+            train_metrics = self.train_epoch(train_loader)
             
             # 验证
             val_metrics = self.validate(val_loader)
             
-            # 更新学习率
-            self.scheduler.step(val_metrics['loss'])
-            
             # 打印指标
-            logging.info(
-                f'Epoch {epoch}: '
-                f'Train Loss: {train_metrics["loss"]:.6f}, '
-                f'Val Loss: {val_metrics["loss"]:.6f}'
-            )
+            self.log_metrics(epoch, train_metrics, val_metrics)
             
-            # 保存检查点
-            if epoch % MODEL_SAVE_FREQUENCY == 0:
-                self.save_checkpoint(
-                    epoch,
-                    val_metrics['loss']
-                )
+            # 记录指标
+            metrics_history['train_loss'].append(train_metrics['loss'])
+            metrics_history['val_loss'].append(val_metrics['loss'])
+            metrics_history['train_recon_loss'].append(train_metrics['recon_loss'])
+            metrics_history['train_kl_loss'].append(train_metrics['kl_loss'])
+            metrics_history['val_recon_loss'].append(val_metrics['recon_loss'])
+            metrics_history['val_kl_loss'].append(val_metrics['kl_loss'])
             
-            # 早停检查
-            self.early_stopping(val_metrics['loss'])
-            if self.early_stopping.early_stop:
-                logging.info("早停触发")
-                break
-            
-            # 更新最佳模型
+            # 保存最佳模型
             if val_metrics['loss'] < self.best_val_loss:
                 self.best_val_loss = val_metrics['loss']
                 self.save_checkpoint(
@@ -278,5 +271,17 @@ class VAETrainer:
                     val_metrics['loss'],
                     is_best=True
                 )
+            
+            # 定期保存模型
+            if epoch % save_every == 0:
+                self.save_checkpoint(
+                    epoch,
+                    val_metrics['loss']
+                )
+            
+            # 早停检查
+            if self.early_stopping(val_metrics['loss']):
+                self.logger.info("触发早停，停止训练")
+                break
         
-        logging.info("训练完成") 
+        return metrics_history 
