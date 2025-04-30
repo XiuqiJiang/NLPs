@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import torch
+import random
 from typing import List, Tuple, Optional
 from torch.utils.data import Dataset, DataLoader
 from transformers import PreTrainedTokenizer
@@ -154,3 +155,16 @@ def onehot_to_sequence(onehot: torch.Tensor) -> str:
     indices = torch.argmax(onehot, dim=1)
     sequence = ''.join([ALPHABET[i] for i in indices])
     return sequence 
+
+# 设置随机种子
+torch.manual_seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
+random.seed(RANDOM_SEED)
+
+# 然后再创建数据加载器
+train_loader, val_loader = create_data_loaders(
+    sequences=sequences,
+    tokenizer=tokenizer,
+    batch_size=VAE_BATCH_SIZE,
+    train_test_split=TRAIN_TEST_SPLIT
+) 

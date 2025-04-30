@@ -4,7 +4,7 @@ MAX_SEQUENCE_LENGTH = 64
 ALPHABET = 'ACDEFGHIKLMNPQRSTVWY'
 
 # ESM模型参数
-ESM_MODEL_NAME = "/data1/xjiang/02.Projects/VAE/NLPs/esm_model"  # 更新为绝对路径
+ESM_MODEL_NAME = "esm_model"  # 相对路径
 ESM_OUTPUT_DIR = "results/models/esm_finetuned"
 ESM_FINETUNE_EPOCHS = 6
 ESM_BATCH_SIZE = 16
