@@ -2,24 +2,48 @@ import torch
 import numpy as np
 from tqdm import tqdm
 import os
-import logging
 from datetime import datetime
 from typing import Dict, Any, Optional, List
 from transformers import AutoTokenizer
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
+import logging
+from pathlib import Path
 
-from config.model_config import *
+# 导入配置文件
+import sys
+from pathlib import Path
+
+# 获取项目根目录
+root_dir = Path(__file__).parent.parent.parent
+config_path = root_dir / 'config' / 'train_config.py'
+
+# 检查配置文件是否存在
+if not config_path.exists():
+    raise FileNotFoundError(f"配置文件不存在: {config_path}")
+
+# 添加项目根目录到Python路径
+sys.path.append(str(root_dir))
+
+# 导入配置
 from config.train_config import *
-from config.data_config import *
+
+# 训练参数设置
+NUM_EPOCHS = 100  # 训练轮数
+SAVE_EVERY = 5    # 每5轮保存一次模型
+EARLY_STOPPING_PATIENCE = 10  # 早停耐心值
+EARLY_STOPPING_MIN_DELTA = 0.01  # 早停最小变化值
+KL_WEIGHT = 0.1   # KL散度权重
+MODEL_SAVE_DIR = 'results/models/vae/weights'  # 模型保存目录
+
 from src.models.vae import ESMVAE, vae_loss
 from src.utils.data_utils import load_sequences, create_data_loaders
 
 class EarlyStopping:
     """早停机制"""
-    def __init__(self, patience: int = 7, verbose: bool = True):
+    def __init__(self, patience: int = 7, min_delta: float = 0.01):
         self.patience = patience
-        self.verbose = verbose
+        self.min_delta = min_delta
         self.counter = 0
         self.best_score = None
         self.early_stop = False
@@ -31,10 +55,8 @@ class EarlyStopping:
         if self.best_score is None:
             self.best_score = score
             self.save_checkpoint(val_loss)
-        elif score < self.best_score:
+        elif score < self.best_score + self.min_delta:
             self.counter += 1
-            if self.verbose:
-                logging.info(f'EarlyStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience:
                 self.early_stop = True
         else:
@@ -43,21 +65,18 @@ class EarlyStopping:
             self.counter = 0
 
     def save_checkpoint(self, val_loss: float):
-        if self.verbose:
-            logging.info(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).')
-        self.val_loss_min = val_loss
+        if val_loss < self.val_loss_min:
+            self.val_loss_min = val_loss
 
 class VAETrainer:
     """VAE训练器类"""
     
     def __init__(
         self,
-        model: ESMVAE,
+        model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
         device: torch.device,
-        model_save_dir: str = MODEL_SAVE_DIR,
-        log_dir: str = LOG_DIR,
-        log_level: str = LOG_LEVEL
+        model_save_dir: str
     ):
         """初始化训练器
         
@@ -66,42 +85,55 @@ class VAETrainer:
             optimizer: 优化器
             device: 设备
             model_save_dir: 模型保存目录
-            log_dir: 日志目录
-            log_level: 日志级别
         """
         self.model = model
         self.optimizer = optimizer
         self.device = device
         self.model_save_dir = model_save_dir
-        self.log_dir = log_dir
         
-        # 设置日志
-        self.setup_logging(log_level)
+        # 创建模型保存目录
+        os.makedirs(model_save_dir, exist_ok=True)
         
         # 初始化早停
         self.early_stopping = EarlyStopping(
             patience=EARLY_STOPPING_PATIENCE,
-            verbose=True
+            min_delta=EARLY_STOPPING_MIN_DELTA
         )
         
         # 初始化最佳验证损失
         self.best_val_loss = float('inf')
+        
+        # 初始化logger
+        self._setup_logger()
     
-    def setup_logging(self, log_level: str) -> None:
-        """设置日志记录"""
-        os.makedirs(self.log_dir, exist_ok=True)
-        log_file = os.path.join(
-            self.log_dir,
-            f'train_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
-        )
-        logging.basicConfig(
-            level=getattr(logging, log_level),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-            handlers=[
-                logging.FileHandler(log_file),
-                logging.StreamHandler()
-            ]
-        )
+    def _setup_logger(self):
+        """设置logger"""
+        # 创建日志目录
+        os.makedirs(LOG_DIR, exist_ok=True)
+        
+        # 创建logger
+        self.logger = logging.getLogger('VAETrainer')
+        self.logger.setLevel(LOG_LEVEL)
+        
+        # 创建文件处理器
+        log_file = os.path.join(LOG_DIR, f'training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(LOG_LEVEL)
+        
+        # 创建控制台处理器
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(LOG_LEVEL)
+        
+        # 创建格式化器
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        # 添加处理器到logger
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
+        
+        self.logger.info("Logger initialized")
     
     def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
         """训练一个epoch
@@ -137,6 +169,12 @@ class VAETrainer:
             total_recon_loss += recon_loss.item()
             total_kl_loss += kl_loss.item()
             num_batches += 1
+            
+            if num_batches % 100 == 0:
+                self.logger.info(
+                    f'Train Batch: {num_batches}/{len(train_loader)} '
+                    f'Loss: {loss.item():.6f}'
+                )
         
         # 计算平均损失
         avg_loss = total_loss / num_batches
@@ -212,8 +250,10 @@ class VAETrainer:
         
         if is_best:
             torch.save(checkpoint, os.path.join(self.model_save_dir, 'best_model.pth'))
+            print(f"保存最佳模型，验证损失: {val_loss:.6f}")
         else:
             torch.save(checkpoint, os.path.join(self.model_save_dir, f'checkpoint_epoch_{epoch}.pth'))
+            print(f"保存第 {epoch} 轮模型，验证损失: {val_loss:.6f}")
     
     def train(
         self,
@@ -252,8 +292,12 @@ class VAETrainer:
             # 验证
             val_metrics = self.validate(val_loader)
             
-            # 打印指标
-            self.log_metrics(epoch, train_metrics, val_metrics)
+            # 记录指标
+            self.logger.info(
+                f'Epoch {epoch}: '
+                f'Train Loss: {train_metrics["loss"]:.6f}, '
+                f'Val Loss: {val_metrics["loss"]:.6f}'
+            )
             
             # 记录指标
             metrics_history['train_loss'].append(train_metrics['loss'])
@@ -271,6 +315,7 @@ class VAETrainer:
                     val_metrics['loss'],
                     is_best=True
                 )
+                self.logger.info(f"保存最佳模型，验证损失: {val_metrics['loss']:.6f}")
             
             # 定期保存模型
             if epoch % save_every == 0:
@@ -278,6 +323,7 @@ class VAETrainer:
                     epoch,
                     val_metrics['loss']
                 )
+                self.logger.info(f"保存第 {epoch} 轮模型，验证损失: {val_metrics['loss']:.6f}")
             
             # 早停检查
             if self.early_stopping(val_metrics['loss']):

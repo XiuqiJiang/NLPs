@@ -1,12 +1,18 @@
 import torch
+import pandas as pd
+from src.utils.data_utils import chopping, padding
+from src.utils.esm_utils import get_esm_embeddings
 
 # 训练参数
 TRAIN_TEST_SPLIT = 0.15
 RANDOM_SEED = 42
+NUM_EPOCHS = 100
+SAVE_EVERY = 5
 EARLY_STOPPING_PATIENCE = 10
 BATCH_SIZE = 32
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 GRADIENT_CLIPPING = 1.0
+KL_WEIGHT = 0.1
 METRICS = ['loss', 'recon_loss', 'kl_loss']
 
 # 模型保存参数
