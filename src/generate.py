@@ -15,15 +15,17 @@ sys.path.append(root_dir)
 NUM_SAMPLES = 10
 LATENT_DIM = 64  # 修改为与VAE模型匹配的维度
 MAX_SEQUENCE_LENGTH = 64
-MODEL_WEIGHTS_PATH = '/content/NLPs/results/models/vae/weights/checkpoint_epoch_95.pth'  # 更新模型权重路径
+MODEL_WEIGHTS_PATH = '/content/NLPs/results/models/vae/weights/checkpoint_epoch_95.pth'
 GENERATED_SEQUENCES_PATH = 'results/generated/sequences.txt'
-ESM_MODEL_NAME = "esm_model"
+ESM_MODEL_NAME = "facebook/esm2_t30_150M_UR50D"  # 使用正确的ESM模型
 RANDOM_SEED = 42
 
 try:
-    from config.config import *
+    from config.model_config import *
+    from config.train_config import *
+    from config.data_config import *
 except ImportError:
-    print("Warning: Could not import from config.config. Using default values.")
+    print("Warning: Could not import from config files. Using default values.")
 
 from src.models.vae import ESMVAE
 from src.utils.data_utils import load_sequences, create_data_loaders
