@@ -2,60 +2,51 @@ import os
 import numpy as np
 import torch
 import random
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 from torch.utils.data import Dataset, DataLoader
-from transformers import PreTrainedTokenizer
+from transformers import AutoTokenizer, AutoModel
 from config.data_config import (
     MAX_SEQUENCE_LENGTH,
     ALPHABET,
     NUM_WORKERS,
     PIN_MEMORY
 )
+from config.config import *
+import pandas as pd
 
-class ProteinDataset(Dataset):
-    """蛋白质序列数据集"""
+class EmbeddingDataset(Dataset):
+    """ESM Embeddings数据集"""
     
     def __init__(
         self,
-        sequences: List[str],
-        tokenizer: PreTrainedTokenizer,
-        max_length: int = MAX_SEQUENCE_LENGTH
+        embeddings: torch.Tensor,
+        sequences: List[str]
     ) -> None:
         """初始化数据集
         
         Args:
-            sequences: 蛋白质序列列表
-            tokenizer: 分词器
-            max_length: 最大序列长度
+            embeddings: 预计算的ESM embeddings
+            sequences: 对应的序列列表
         """
+        self.embeddings = embeddings
         self.sequences = sequences
-        self.tokenizer = tokenizer
-        self.max_length = max_length
     
     def __len__(self) -> int:
-        return len(self.sequences)
+        return len(self.embeddings)
     
-    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, str]:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """获取数据项
         
         Args:
             idx: 索引
             
         Returns:
-            编码后的序列和原始序列
+            包含embeddings的字典
         """
-        sequence = self.sequences[idx]
-        
-        # 编码序列
-        encoded = self.tokenizer(
-            sequence,
-            max_length=self.max_length,
-            padding='max_length',
-            truncation=True,
-            return_tensors='pt'
-        )
-        
-        return encoded['input_ids'].squeeze(0), sequence
+        return {
+            'embeddings': self.embeddings[idx],
+            'sequence': self.sequences[idx]
+        }
 
 def load_sequences(file_path: str) -> List[str]:
     """加载蛋白质序列
@@ -70,17 +61,25 @@ def load_sequences(file_path: str) -> List[str]:
         raise FileNotFoundError(f"序列文件不存在: {file_path}")
     
     sequences = []
-    with open(file_path, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('>'):
-                sequences.append(line)
+    try:
+        with open(file_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith('>'):
+                    sequences.append(line)
+    except Exception as e:
+        print(f"读取文件 {file_path} 时出错: {str(e)}")
+        raise
     
+    if not sequences:
+        print(f"警告: 文件 {file_path} 中没有找到任何序列")
+    
+    print(f"从文件 {file_path} 中成功加载 {len(sequences)} 个序列")
     return sequences
 
 def create_data_loaders(
+    embeddings: torch.Tensor,
     sequences: List[str],
-    tokenizer: PreTrainedTokenizer,
     batch_size: int,
     train_test_split: float = 0.15,
     num_workers: int = NUM_WORKERS,
@@ -89,8 +88,8 @@ def create_data_loaders(
     """创建数据加载器
     
     Args:
-        sequences: 序列列表
-        tokenizer: 分词器
+        embeddings: 预计算的ESM embeddings
+        sequences: 对应的序列列表
         batch_size: 批次大小
         train_test_split: 训练集比例
         num_workers: 数据加载线程数
@@ -100,14 +99,22 @@ def create_data_loaders(
         训练和验证数据加载器
     """
     # 划分训练集和验证集
-    np.random.shuffle(sequences)
-    split_idx = int(len(sequences) * (1 - train_test_split))
-    train_sequences = sequences[:split_idx]
-    val_sequences = sequences[split_idx:]
+    indices = np.arange(len(embeddings))
+    np.random.shuffle(indices)
+    split_idx = int(len(indices) * (1 - train_test_split))
+    
+    train_indices = indices[:split_idx]
+    val_indices = indices[split_idx:]
     
     # 创建数据集
-    train_dataset = ProteinDataset(train_sequences, tokenizer)
-    val_dataset = ProteinDataset(val_sequences, tokenizer)
+    train_dataset = EmbeddingDataset(
+        embeddings=embeddings[train_indices],
+        sequences=[sequences[i] for i in train_indices]
+    )
+    val_dataset = EmbeddingDataset(
+        embeddings=embeddings[val_indices],
+        sequences=[sequences[i] for i in val_indices]
+    )
     
     # 创建数据加载器
     train_loader = DataLoader(
@@ -128,31 +135,115 @@ def create_data_loaders(
     
     return train_loader, val_loader
 
-def sequence_to_onehot(sequence: str) -> torch.Tensor:
-    """将序列转换为one-hot编码
+def get_esm_embeddings(
+    sequences: List[str],
+    batch_size: int = 32
+) -> torch.Tensor:
+    """使用ESM模型获取序列的embeddings
     
     Args:
-        sequence: 蛋白质序列
+        sequences: 氨基酸序列列表
+        batch_size: 批处理大小，用于避免OOM错误
         
     Returns:
-        one-hot编码张量
+        序列的embeddings张量，形状为 [num_sequences, embedding_dim]
     """
-    onehot = torch.zeros(len(sequence), len(ALPHABET))
-    for i, aa in enumerate(sequence):
-        if aa in ALPHABET:
-            onehot[i, ALPHABET.index(aa)] = 1
-    return onehot
+    # 加载tokenizer和模型
+    tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME)
+    model = AutoModel.from_pretrained(ESM_MODEL_NAME)
+    
+    # 将模型移到GPU（如果可用）
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = model.to(device)
+    model.eval()  # 设置为评估模式
+    
+    # 初始化存储所有embeddings的列表
+    all_embeddings = []
+    
+    # 分批处理序列
+    for i in range(0, len(sequences), batch_size):
+        batch_sequences = sequences[i:i + batch_size]
+        
+        # 对序列进行编码
+        encoded = tokenizer(
+            batch_sequences,
+            padding=True,
+            truncation=True,
+            max_length=MAX_SEQUENCE_LENGTH,
+            return_tensors='pt'
+        )
+        
+        # 将输入移到设备
+        input_ids = encoded['input_ids'].to(device)
+        attention_mask = encoded['attention_mask'].to(device)
+        
+        # 获取embeddings
+        with torch.no_grad():
+            outputs = model(input_ids, attention_mask=attention_mask)
+            # 获取最后一层的hidden states
+            hidden_states = outputs.last_hidden_state
+            
+            # 使用attention_mask进行平均池化
+            # 将attention_mask扩展到最后两个维度
+            attention_mask = attention_mask.unsqueeze(-1).expand(hidden_states.size())
+            # 将padding位置的hidden states置为0
+            hidden_states = hidden_states * attention_mask
+            # 计算每个序列的有效长度（非padding位置的数量）
+            seq_lengths = attention_mask.sum(dim=1)
+            # 计算平均池化
+            batch_embeddings = hidden_states.sum(dim=1) / seq_lengths
+            
+            all_embeddings.append(batch_embeddings)
+    
+    # 将所有批次的embeddings拼接起来
+    embeddings = torch.cat(all_embeddings, dim=0)
+    
+    return embeddings
 
-def onehot_to_sequence(onehot: torch.Tensor) -> str:
-    """将one-hot编码转换为序列
+def prepare_VAE(data: str | List[str], csv: bool = False) -> Tuple[torch.Tensor, List[str]]:
+    """准备VAE的输入数据
     
     Args:
-        onehot: one-hot编码张量
+        data: 序列数据（可以是文件路径或序列列表）
+        csv: 是否为CSV文件
         
     Returns:
-        蛋白质序列
+        序列的embeddings张量和原始序列列表
     """
-    indices = torch.argmax(onehot, dim=1)
-    sequence = ''.join([ALPHABET[i] for i in indices])
-    return sequence 
+    if isinstance(data, str):
+        if csv:
+            # 如果是CSV文件，读取序列
+            try:
+                df = pd.read_csv(data)
+                if 'sequence' not in df.columns:
+                    raise ValueError("CSV文件必须包含'sequence'列")
+                sequences = df['sequence'].tolist()
+            except Exception as e:
+                print(f"读取CSV文件时出错: {str(e)}")
+                raise
+        else:
+            # 如果是文本文件，直接读取序列
+            try:
+                sequences = load_sequences(data)
+            except Exception as e:
+                print(f"读取文本文件时出错: {str(e)}")
+                raise
+    else:
+        # 如果已经是序列列表，直接使用
+        sequences = data
+    
+    if not sequences:
+        raise ValueError("没有找到任何序列数据")
+    
+    print(f"成功加载 {len(sequences)} 个序列")
+    
+    # 使用ESM模型获取embeddings
+    try:
+        embeddings = get_esm_embeddings(sequences)
+        print(f"成功生成embeddings，形状: {embeddings.shape}")
+    except Exception as e:
+        print(f"生成embeddings时出错: {str(e)}")
+        raise
+    
+    return embeddings, sequences
 

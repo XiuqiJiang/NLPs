@@ -1,7 +1,6 @@
 import torch
 import pandas as pd
-from src.utils.data_utils import chopping, padding
-from src.utils.esm_utils import get_esm_embeddings
+from NLPs.src.utils.data_utils import get_esm_embeddings
 
 # 训练参数
 TRAIN_TEST_SPLIT = 0.15
