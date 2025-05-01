@@ -28,20 +28,21 @@ class EmbeddingDataset(Dataset):
             embeddings: 预计算的ESM embeddings
             sequences: 对应的序列列表
         """
+        # 确保embeddings在CPU上
         self.embeddings = embeddings
         self.sequences = sequences
     
     def __len__(self) -> int:
         return len(self.embeddings)
     
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         """获取数据项
         
         Args:
             idx: 索引
             
         Returns:
-            包含embeddings的字典
+            包含embeddings和序列的字典
         """
         return {
             'embeddings': self.embeddings[idx],
@@ -82,8 +83,8 @@ def create_data_loaders(
     sequences: List[str],
     batch_size: int,
     train_test_split: float = 0.15,
-    num_workers: int = NUM_WORKERS,
-    pin_memory: bool = PIN_MEMORY
+    num_workers: int = NUM_WORKERS,  # 使用配置的多进程数
+    pin_memory: bool = PIN_MEMORY  # 使用配置的固定内存设置
 ) -> Tuple[DataLoader, DataLoader]:
     """创建数据加载器
     
@@ -122,7 +123,8 @@ def create_data_loaders(
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        drop_last=True  # 丢弃不完整的批次
     )
     
     val_loader = DataLoader(
@@ -130,7 +132,8 @@ def create_data_loaders(
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        drop_last=True  # 丢弃不完整的批次
     )
     
     return train_loader, val_loader
@@ -195,8 +198,8 @@ def get_esm_embeddings(
             
             all_embeddings.append(batch_embeddings)
     
-    # 将所有批次的embeddings拼接起来
-    embeddings = torch.cat(all_embeddings, dim=0)
+    # 将所有批次的embeddings拼接起来并移到CPU
+    embeddings = torch.cat(all_embeddings, dim=0).cpu()
     
     return embeddings
 
