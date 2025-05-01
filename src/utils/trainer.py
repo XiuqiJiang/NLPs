@@ -142,50 +142,46 @@ class VAETrainer:
             train_loader: 训练数据加载器
             
         Returns:
-            训练指标
+            训练指标字典
         """
         self.model.train()
         total_loss = 0
         total_recon_loss = 0
         total_kl_loss = 0
-        num_batches = 0
         
         for batch in train_loader:
+            # 将数据移到GPU
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            
             # 前向传播
             outputs = self.model(batch)
+            reconstructed_batch, mean, logvar = outputs
             
             # 计算损失
-            loss = outputs['loss']
-            recon_loss = outputs['recon_loss']
-            kl_loss = outputs['kl_loss']
+            embeddings_batch = batch['embeddings']
+            recon_loss = self.criterion(reconstructed_batch, embeddings_batch)
+            kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
+            loss = recon_loss + self.kl_weight * kl_loss
             
             # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             
-            # 累加损失
+            # 更新统计信息
             total_loss += loss.item()
             total_recon_loss += recon_loss.item()
             total_kl_loss += kl_loss.item()
-            num_batches += 1
-            
-            if num_batches % 100 == 0:
-                self.logger.info(
-                    f'Train Batch: {num_batches}/{len(train_loader)} '
-                    f'Loss: {loss.item():.6f}'
-                )
         
         # 计算平均损失
-        avg_loss = total_loss / num_batches
-        avg_recon_loss = total_recon_loss / num_batches
-        avg_kl_loss = total_kl_loss / num_batches
-        
-        return {
-            'loss': avg_loss,
-            'recon_loss': avg_recon_loss,
-            'kl_loss': avg_kl_loss
+        num_batches = len(train_loader)
+        metrics = {
+            'train_loss': total_loss / num_batches,
+            'train_recon_loss': total_recon_loss / num_batches,
+            'train_kl_loss': total_kl_loss / num_batches
         }
+        
+        return metrics
     
     def validate(
         self,
@@ -295,15 +291,15 @@ class VAETrainer:
             # 记录指标
             self.logger.info(
                 f'Epoch {epoch}: '
-                f'Train Loss: {train_metrics["loss"]:.6f}, '
+                f'Train Loss: {train_metrics["train_loss"]:.6f}, '
                 f'Val Loss: {val_metrics["loss"]:.6f}'
             )
             
             # 记录指标
-            metrics_history['train_loss'].append(train_metrics['loss'])
+            metrics_history['train_loss'].append(train_metrics['train_loss'])
             metrics_history['val_loss'].append(val_metrics['loss'])
-            metrics_history['train_recon_loss'].append(train_metrics['recon_loss'])
-            metrics_history['train_kl_loss'].append(train_metrics['kl_loss'])
+            metrics_history['train_recon_loss'].append(train_metrics['train_recon_loss'])
+            metrics_history['train_kl_loss'].append(train_metrics['train_kl_loss'])
             metrics_history['val_recon_loss'].append(val_metrics['recon_loss'])
             metrics_history['val_kl_loss'].append(val_metrics['kl_loss'])
             

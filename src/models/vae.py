@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForMaskedLM
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 from config.config import (
     ESM_MODEL_NAME,
     LATENT_DIM,
@@ -10,125 +10,106 @@ from config.config import (
 )
 
 class ESMVAE(nn.Module):
-    """基于ESM的变分自编码器模型
-    
-    使用预训练的ESM模型作为编码器，实现蛋白质序列的变分自编码。
-    
-    Attributes:
-        esm: 预训练的ESM模型
-        encoder_mean: 编码器均值层
-        encoder_logvar: 编码器方差层
-        decoder: 解码器网络
-        output_layer: 输出层
-    """
+    """基于ESM的变分自编码器"""
     
     def __init__(
         self,
-        esm_model: Optional[AutoModelForMaskedLM] = None,
-        esm_model_name: str = ESM_MODEL_NAME,
-        latent_dim: int = LATENT_DIM,
-        hidden_dim: int = HIDDEN_DIM
+        embedding_dim: int = 1280,  # ESM-2的embedding维度
+        latent_dim: int = 64,
+        hidden_dims: List[int] = [512, 256]
     ) -> None:
-        """初始化ESMVAE模型
+        """初始化VAE
         
         Args:
-            esm_model: 预加载的ESM模型，如果为None则从esm_model_name加载
-            esm_model_name: ESM模型名称或路径
-            latent_dim: 潜在空间维度
-            hidden_dim: 隐藏层维度
+            embedding_dim: 输入embedding的维度
+            latent_dim: 隐变量的维度
+            hidden_dims: 编码器和解码器的隐藏层维度
         """
-        super(ESMVAE, self).__init__()
+        super().__init__()
         
-        # 加载或使用预加载的ESM模型
-        if esm_model is None:
-            self.esm = AutoModelForMaskedLM.from_pretrained(esm_model_name)
-        else:
-            self.esm = esm_model
+        self.embedding_dim = embedding_dim
+        self.latent_dim = latent_dim
         
-        # 获取ESM的隐藏层维度
-        esm_hidden_dim = self.esm.config.hidden_size
+        # 编码器
+        encoder_layers = []
+        in_features = embedding_dim
         
-        # 编码器部分
-        self.encoder_mean = nn.Linear(esm_hidden_dim, latent_dim)
-        self.encoder_logvar = nn.Linear(esm_hidden_dim, latent_dim)
+        for h_dim in hidden_dims:
+            encoder_layers.extend([
+                nn.Linear(in_features, h_dim),
+                nn.BatchNorm1d(h_dim),
+                nn.ReLU(inplace=True)
+            ])
+            in_features = h_dim
         
-        # 解码器部分
-        self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, esm_hidden_dim),
-            nn.ReLU()
-        )
+        self.encoder = nn.Sequential(*encoder_layers)
         
-        # 最终输出层
-        self.output_layer = nn.Linear(esm_hidden_dim, len(ALPHABET))
+        # 均值和对数方差层
+        self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
+        self.fc_var = nn.Linear(hidden_dims[-1], latent_dim)
         
-    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """编码输入序列
+        # 解码器
+        decoder_layers = []
+        in_features = latent_dim
+        
+        for h_dim in reversed(hidden_dims):
+            decoder_layers.extend([
+                nn.Linear(in_features, h_dim),
+                nn.BatchNorm1d(h_dim),
+                nn.ReLU(inplace=True)
+            ])
+            in_features = h_dim
+        
+        decoder_layers.append(nn.Linear(hidden_dims[0], embedding_dim))
+        self.decoder = nn.Sequential(*decoder_layers)
+    
+    def encode(self, x: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """编码输入数据
         
         Args:
-            x: 输入序列张量
+            x: 包含embeddings的字典
             
         Returns:
-            潜在空间的均值和方差
+            均值和方差
         """
-        # 使用ESM获取序列表示
-        esm_outputs = self.esm(x, output_hidden_states=True)
-        hidden_states = esm_outputs.hidden_states[-1]  # 使用最后一层隐藏状态
-        
-        # 确保hidden_states的维度正确
-        if len(hidden_states.shape) == 3:  # [batch_size, seq_len, hidden_dim]
-            pooled = hidden_states.mean(dim=1)  # 池化操作 [batch_size, hidden_dim]
-        else:
-            pooled = hidden_states  # 已经是[batch_size, hidden_dim]
-        
-        # 计算均值和方差
-        mean = self.encoder_mean(pooled)
-        logvar = self.encoder_logvar(pooled)
-        return mean, logvar
+        # 直接使用embeddings
+        embeddings = x['embeddings']
+        h = self.encoder(embeddings)
+        return self.fc_mu(h), self.fc_var(h)
     
-    def reparameterize(
-        self,
-        mean: torch.Tensor,
-        logvar: torch.Tensor
-    ) -> torch.Tensor:
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
         """重参数化技巧
         
         Args:
-            mean: 均值
+            mu: 均值
             logvar: 对数方差
             
         Returns:
-            采样得到的潜在向量
+            采样得到的隐变量
         """
         std = torch.exp(0.5 * logvar)
         eps = torch.randn_like(std)
-        return mean + eps * std
+        return mu + eps * std
     
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        """解码潜在向量
+        """解码隐变量
         
         Args:
-            z: 潜在向量
+            z: 隐变量
             
         Returns:
-            重建的序列logits
+            重建的embeddings
         """
-        h = self.decoder(z)
-        logits = self.output_layer(h)
-        return logits
+        return self.decoder(z)
     
-    def forward(
-        self,
-        x: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, x: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """前向传播
         
         Args:
-            x: 输入序列张量
+            x: 包含embeddings的字典
             
         Returns:
-            重建序列logits、均值和方差
+            重建embeddings、均值和方差
         """
         mean, logvar = self.encode(x)
         z = self.reparameterize(mean, logvar)
