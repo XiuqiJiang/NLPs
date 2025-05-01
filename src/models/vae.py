@@ -30,6 +30,9 @@ class ESMVAE(nn.Module):
         self.embedding_dim = embedding_dim
         self.latent_dim = latent_dim
         
+        # 加载ESM模型
+        self.esm_model = AutoModelForMaskedLM.from_pretrained(ESM_MODEL_NAME)
+        
         # 编码器
         encoder_layers = []
         in_features = embedding_dim

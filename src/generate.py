@@ -13,9 +13,9 @@ sys.path.append(root_dir)
 
 # 默认配置值
 NUM_SAMPLES = 10
-LATENT_DIM = 50
+LATENT_DIM = 64  # 修改为与VAE模型匹配的维度
 MAX_SEQUENCE_LENGTH = 64
-MODEL_WEIGHTS_PATH = 'results/models/vae/weights/epoch_100.pth'
+MODEL_WEIGHTS_PATH = '/content/NLPs/results/models/vae/weights/checkpoint_epoch_95.pth'  # 更新模型权重路径
 GENERATED_SEQUENCES_PATH = 'results/generated/sequences.txt'
 ESM_MODEL_NAME = "esm_model"
 RANDOM_SEED = 42
@@ -79,10 +79,18 @@ def generate_sequences(
             z = torch.randn(1, LATENT_DIM).to(device)
             
             # 生成序列
-            sequence = model.decode(z)
+            embeddings = model.decode(z)
+            
+            # 使用ESM模型生成序列
+            outputs = model.esm_model.generate(
+                inputs_embeds=embeddings,
+                max_length=MAX_SEQUENCE_LENGTH,
+                do_sample=True,
+                num_return_sequences=1
+            )
             
             # 解码序列
-            sequence = tokenizer.decode(sequence[0].tolist())
+            sequence = tokenizer.decode(outputs[0], skip_special_tokens=True)
             sequences.append(sequence)
             unique_sequences.add(sequence)
             
