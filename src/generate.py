@@ -5,9 +5,26 @@ import numpy as np
 from transformers import AutoTokenizer
 from datetime import datetime
 import traceback
+from typing import Dict, Any, List
 
-from config.model_config import *
-from config.generate_config import *
+# 添加项目根目录到Python路径
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(root_dir)
+
+# 默认配置值
+NUM_SAMPLES = 10
+LATENT_DIM = 50
+MAX_SEQUENCE_LENGTH = 64
+MODEL_WEIGHTS_PATH = 'results/models/vae/weights/epoch_100.pth'
+GENERATED_SEQUENCES_PATH = 'results/generated/sequences.txt'
+ESM_MODEL_NAME = "esm_model"
+RANDOM_SEED = 42
+
+try:
+    from config.config import *
+except ImportError:
+    print("Warning: Could not import from config.config. Using default values.")
+
 from src.models.vae import ESMVAE
 from src.utils.data_utils import load_sequences, create_data_loaders
 
@@ -33,8 +50,7 @@ def generate_sequences(
     model: ESMVAE,
     tokenizer: AutoTokenizer,
     device: torch.device,
-    num_samples: int = NUM_SAMPLES,
-    temperature: float = 1.0
+    num_samples: int = NUM_SAMPLES
 ) -> Dict[str, Any]:
     """生成序列
     
@@ -43,13 +59,12 @@ def generate_sequences(
         tokenizer: 分词器
         device: 设备
         num_samples: 生成序列数量
-        temperature: 温度参数
         
     Returns:
         生成结果和指标
     """
     print(f"开始生成序列，使用设备: {device}")
-    print(f"生成参数: num_samples={num_samples}, temperature={temperature}")
+    print(f"生成参数: num_samples={num_samples}")
     
     model.eval()
     sequences = []
@@ -64,7 +79,7 @@ def generate_sequences(
             z = torch.randn(1, LATENT_DIM).to(device)
             
             # 生成序列
-            sequence = model.decode(z, temperature=temperature)
+            sequence = model.decode(z)
             
             # 解码序列
             sequence = tokenizer.decode(sequence[0].tolist())
