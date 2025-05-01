@@ -238,15 +238,15 @@ class VAETrainer:
         num_batches = len(val_loader)
         if num_batches > 0:
             metrics = {
-                'loss': total_loss / num_batches,
-                'recon_loss': total_recon_loss / num_batches,
-                'kl_loss': total_kl_loss / num_batches
+                'val_loss': total_loss / num_batches,
+                'val_recon_loss': total_recon_loss / num_batches,
+                'val_kl_loss': total_kl_loss / num_batches
             }
         else:
             metrics = {
-                'loss': float('inf'),
-                'recon_loss': float('inf'),
-                'kl_loss': float('inf')
+                'val_loss': float('inf'),
+                'val_recon_loss': float('inf'),
+                'val_kl_loss': float('inf')
             }
         
         return metrics
@@ -321,37 +321,37 @@ class VAETrainer:
             self.logger.info(
                 f'Epoch {epoch}: '
                 f'Train Loss: {train_metrics["train_loss"]:.6f}, '
-                f'Val Loss: {val_metrics["loss"]:.6f}'
+                f'Val Loss: {val_metrics["val_loss"]:.6f}'
             )
             
             # 记录指标
             metrics_history['train_loss'].append(train_metrics['train_loss'])
-            metrics_history['val_loss'].append(val_metrics['loss'])
+            metrics_history['val_loss'].append(val_metrics['val_loss'])
             metrics_history['train_recon_loss'].append(train_metrics['train_recon_loss'])
             metrics_history['train_kl_loss'].append(train_metrics['train_kl_loss'])
-            metrics_history['val_recon_loss'].append(val_metrics['recon_loss'])
-            metrics_history['val_kl_loss'].append(val_metrics['kl_loss'])
+            metrics_history['val_recon_loss'].append(val_metrics['val_recon_loss'])
+            metrics_history['val_kl_loss'].append(val_metrics['val_kl_loss'])
             
             # 保存最佳模型
-            if val_metrics['loss'] < self.best_val_loss:
-                self.best_val_loss = val_metrics['loss']
+            if val_metrics['val_loss'] < self.best_val_loss:
+                self.best_val_loss = val_metrics['val_loss']
                 self.save_checkpoint(
                     epoch,
-                    val_metrics['loss'],
+                    val_metrics['val_loss'],
                     is_best=True
                 )
-                self.logger.info(f"保存最佳模型，验证损失: {val_metrics['loss']:.6f}")
+                self.logger.info(f"保存最佳模型，验证损失: {val_metrics['val_loss']:.6f}")
             
             # 定期保存模型
             if epoch % save_every == 0:
                 self.save_checkpoint(
                     epoch,
-                    val_metrics['loss']
+                    val_metrics['val_loss']
                 )
-                self.logger.info(f"保存第 {epoch} 轮模型，验证损失: {val_metrics['loss']:.6f}")
+                self.logger.info(f"保存第 {epoch} 轮模型，验证损失: {val_metrics['val_loss']:.6f}")
             
             # 早停检查
-            if self.early_stopping(val_metrics['loss']):
+            if self.early_stopping(val_metrics['val_loss']):
                 self.logger.info("触发早停，停止训练")
                 break
         
