@@ -206,26 +206,34 @@ class VAETrainer:
         total_kl_loss = 0
         
         with torch.no_grad():
-            for data, _ in val_loader:
-                data = data.to(self.device)
-                recon_batch, mean, logvar = self.model(data)
-                loss, recon_loss, kl_loss = vae_loss(
-                    recon_batch, data, mean, logvar, KL_WEIGHT
-                )
+            for batch in val_loader:
+                # 将数据移到GPU
+                batch = {k: v.to(self.device) for k, v in batch.items()}
                 
+                # 前向传播
+                outputs = self.model(batch)
+                reconstructed_batch, mean, logvar = outputs
+                
+                # 计算损失
+                embeddings_batch = batch['embeddings']
+                recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)
+                kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
+                loss = recon_loss + KL_WEIGHT * kl_loss
+                
+                # 更新统计信息
                 total_loss += loss.item()
                 total_recon_loss += recon_loss.item()
                 total_kl_loss += kl_loss.item()
         
-        avg_loss = total_loss / len(val_loader)
-        avg_recon_loss = total_recon_loss / len(val_loader)
-        avg_kl_loss = total_kl_loss / len(val_loader)
-        
-        return {
-            'loss': avg_loss,
-            'recon_loss': avg_recon_loss,
-            'kl_loss': avg_kl_loss
+        # 计算平均损失
+        num_batches = len(val_loader)
+        metrics = {
+            'loss': total_loss / num_batches,
+            'recon_loss': total_recon_loss / num_batches,
+            'kl_loss': total_kl_loss / num_batches
         }
+        
+        return metrics
     
     def save_checkpoint(
         self,
