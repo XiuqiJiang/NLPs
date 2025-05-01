@@ -20,17 +20,20 @@ class EmbeddingDataset(Dataset):
     def __init__(
         self,
         embeddings: torch.Tensor,
-        sequences: List[str]
+        sequences: List[str],
+        max_length: int = 64  # 修改为64
     ) -> None:
         """初始化数据集
         
         Args:
             embeddings: 预计算的ESM embeddings
             sequences: 对应的序列列表
+            max_length: 最大序列长度
         """
         # 确保embeddings在CPU上
         self.embeddings = embeddings
         self.sequences = sequences
+        self.max_length = max_length
     
     def __len__(self) -> int:
         return len(self.embeddings)
@@ -44,9 +47,15 @@ class EmbeddingDataset(Dataset):
         Returns:
             包含embeddings和序列的字典
         """
+        # 将序列转换为张量并填充到固定长度
+        sequence = self.sequences[idx]
+        sequence_tensor = torch.zeros(self.max_length, dtype=torch.long)  # 创建全零张量
+        sequence_encoded = torch.tensor([ord(c) for c in sequence], dtype=torch.long)  # 编码序列
+        sequence_tensor[:min(len(sequence_encoded), self.max_length)] = sequence_encoded[:self.max_length]  # 填充序列
+        
         return {
             'embeddings': self.embeddings[idx],
-            'sequence': torch.tensor([ord(c) for c in self.sequences[idx]], dtype=torch.long)  # 将序列转换为张量
+            'sequence': sequence_tensor
         }
 
 def load_sequences(file_path: str) -> List[str]:
@@ -83,8 +92,9 @@ def create_data_loaders(
     sequences: List[str],
     batch_size: int,
     train_test_split: float = 0.15,
-    num_workers: int = NUM_WORKERS,  # 使用配置的多进程数
-    pin_memory: bool = PIN_MEMORY  # 使用配置的固定内存设置
+    num_workers: int = NUM_WORKERS,
+    pin_memory: bool = PIN_MEMORY,
+    max_sequence_length: int = 64  # 修改为64
 ) -> Tuple[DataLoader, DataLoader]:
     """创建数据加载器
     
@@ -95,6 +105,7 @@ def create_data_loaders(
         train_test_split: 训练集比例
         num_workers: 数据加载线程数
         pin_memory: 是否使用固定内存
+        max_sequence_length: 最大序列长度
         
     Returns:
         训练和验证数据加载器
@@ -110,11 +121,13 @@ def create_data_loaders(
     # 创建数据集
     train_dataset = EmbeddingDataset(
         embeddings=embeddings[train_indices],
-        sequences=[sequences[i] for i in train_indices]
+        sequences=[sequences[i] for i in train_indices],
+        max_length=max_sequence_length
     )
     val_dataset = EmbeddingDataset(
         embeddings=embeddings[val_indices],
-        sequences=[sequences[i] for i in val_indices]
+        sequences=[sequences[i] for i in val_indices],
+        max_length=max_sequence_length
     )
     
     # 创建数据加载器
