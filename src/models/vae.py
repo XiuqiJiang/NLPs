@@ -14,7 +14,7 @@ class ESMVAE(nn.Module):
     
     def __init__(
         self,
-        embedding_dim: int = 1280,  # ESM-2的embedding维度
+        embedding_dim: int = 320,  # 修改为ESM-2的embedding维度
         latent_dim: int = 64,
         hidden_dims: List[int] = [512, 256]
     ) -> None:
