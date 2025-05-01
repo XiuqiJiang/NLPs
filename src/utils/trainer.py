@@ -164,9 +164,9 @@ class VAETrainer:
             
             # 计算损失
             embeddings_batch = batch['embeddings']
-            recon_loss = self.criterion(reconstructed_batch, embeddings_batch)
+            recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)  # 直接使用MSE损失
             kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
-            loss = recon_loss + self.kl_weight * kl_loss
+            loss = recon_loss + KL_WEIGHT * kl_loss  # 使用全局KL_WEIGHT
             
             # 反向传播
             self.optimizer.zero_grad()
