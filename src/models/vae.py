@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from transformers import AutoModelForMaskedLM
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Dict
 from config.config import (
     ESM_MODEL_NAME,
     LATENT_DIM,

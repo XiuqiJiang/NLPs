@@ -35,7 +35,7 @@ class EmbeddingDataset(Dataset):
     def __len__(self) -> int:
         return len(self.embeddings)
     
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """获取数据项
         
         Args:
@@ -46,7 +46,7 @@ class EmbeddingDataset(Dataset):
         """
         return {
             'embeddings': self.embeddings[idx],
-            'sequence': self.sequences[idx]
+            'sequence': torch.tensor([ord(c) for c in self.sequences[idx]], dtype=torch.long)  # 将序列转换为张量
         }
 
 def load_sequences(file_path: str) -> List[str]:
