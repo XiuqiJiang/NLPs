@@ -286,7 +286,7 @@ class VAETrainer:
         val_loader: DataLoader,
         num_epochs: int = NUM_EPOCHS,
         save_every: int = SAVE_EVERY
-    ) -> Dict[str, List[float]]:
+    ) -> None:
         """训练模型
         
         Args:
@@ -294,70 +294,23 @@ class VAETrainer:
             val_loader: 验证数据加载器
             num_epochs: 训练轮数
             save_every: 每隔多少轮保存一次模型
-            
-        Returns:
-            训练过程中的指标记录
         """
         self.logger.info("开始训练...")
         
-        # 初始化指标记录
-        metrics_history = {
-            'train_loss': [],
-            'val_loss': [],
-            'train_recon_loss': [],
-            'train_kl_loss': [],
-            'val_recon_loss': [],
-            'val_kl_loss': []
-        }
-        
         for epoch in range(1, num_epochs + 1):
             # 训练
-            train_metrics = self.train_epoch(train_loader)
+            self.train_epoch(train_loader)
             
             # 验证
-            val_metrics = self.validate(val_loader)
+            self.validate(val_loader)
             
-            # 记录指标
-            self.logger.info(
-                f'Epoch {epoch}: '
-                f'Train Loss: {train_metrics.get("train_loss", float("inf")):.6f}, '
-                f'Train Recon Loss: {train_metrics.get("train_recon_loss", float("inf")):.6f}, '
-                f'Train KL Loss: {train_metrics.get("train_kl_loss", float("inf")):.6f}, '
-                f'Val Loss: {val_metrics.get("val_loss", float("inf")):.6f}, '
-                f'Val Recon Loss: {val_metrics.get("val_recon_loss", float("inf")):.6f}, '
-                f'Val KL Loss: {val_metrics.get("val_kl_loss", float("inf")):.6f}'
-            )
-            
-            # 记录指标
-            metrics_history['train_loss'].append(train_metrics.get('train_loss', float('inf')))
-            metrics_history['val_loss'].append(val_metrics.get('val_loss', float('inf')))
-            metrics_history['train_recon_loss'].append(train_metrics.get('train_recon_loss', float('inf')))
-            metrics_history['train_kl_loss'].append(train_metrics.get('train_kl_loss', float('inf')))
-            metrics_history['val_recon_loss'].append(val_metrics.get('val_recon_loss', float('inf')))
-            metrics_history['val_kl_loss'].append(val_metrics.get('val_kl_loss', float('inf')))
-            
-            # 保存最佳模型
-            current_val_loss = val_metrics.get('val_loss', float('inf'))
-            if current_val_loss < self.best_val_loss:
-                self.best_val_loss = current_val_loss
-                self.save_checkpoint(
-                    epoch,
-                    current_val_loss,
-                    is_best=True
-                )
-                self.logger.info(f"保存最佳模型，验证损失: {current_val_loss:.6f}")
+            # 记录当前epoch
+            self.logger.info(f'Epoch {epoch} 完成')
             
             # 定期保存模型
             if epoch % save_every == 0:
                 self.save_checkpoint(
                     epoch,
-                    current_val_loss
+                    float('inf')
                 )
-                self.logger.info(f"保存第 {epoch} 轮模型，验证损失: {current_val_loss:.6f}")
-            
-            # 早停检查
-            if self.early_stopping(current_val_loss):
-                self.logger.info("触发早停，停止训练")
-                break
-        
-        return metrics_history 
+                self.logger.info(f"保存第 {epoch} 轮模型") 
