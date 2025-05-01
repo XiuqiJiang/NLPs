@@ -9,6 +9,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 import logging
 from pathlib import Path
+import torch.nn as nn
 
 # 导入配置文件
 import sys
@@ -102,6 +103,10 @@ class VAETrainer:
         
         # 初始化最佳验证损失
         self.best_val_loss = float('inf')
+        
+        # 初始化损失函数
+        self.criterion = nn.MSELoss()  # 使用MSE损失函数
+        self.kl_weight = KL_WEIGHT  # KL散度的权重
         
         # 初始化logger
         self._setup_logger()
