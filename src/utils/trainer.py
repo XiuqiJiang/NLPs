@@ -140,14 +140,11 @@ class VAETrainer:
         
         self.logger.info("Logger initialized")
     
-    def train_epoch(self, train_loader: DataLoader) -> Dict[str, float]:
+    def train_epoch(self, train_loader: DataLoader) -> None:
         """训练一个epoch
         
         Args:
             train_loader: 训练数据加载器
-            
-        Returns:
-            训练指标字典
         """
         self.model.train()
         total_loss = 0
@@ -180,25 +177,20 @@ class VAETrainer:
         
         # 计算平均损失
         num_batches = len(train_loader)
-        metrics = {
-            'train_loss': total_loss / num_batches,
-            'train_recon_loss': total_recon_loss / num_batches,
-            'train_kl_loss': total_kl_loss / num_batches
-        }
-        
-        return metrics
-    
+        if num_batches > 0:
+            avg_loss = total_loss / num_batches
+            avg_recon_loss = total_recon_loss / num_batches
+            avg_kl_loss = total_kl_loss / num_batches
+            self.logger.info(f"训练 - 平均损失: {avg_loss:.6f}, 重建损失: {avg_recon_loss:.6f}, KL损失: {avg_kl_loss:.6f}")
+
     def validate(
         self,
         val_loader: torch.utils.data.DataLoader
-    ) -> Dict[str, float]:
+    ) -> None:
         """验证模型
         
         Args:
             val_loader: 验证数据加载器
-            
-        Returns:
-            验证指标
         """
         self.model.eval()
         total_loss = 0
@@ -237,19 +229,10 @@ class VAETrainer:
         # 计算平均损失
         num_batches = len(val_loader)
         if num_batches > 0:
-            metrics = {
-                'loss': total_loss / num_batches,
-                'recon_loss': total_recon_loss / num_batches,
-                'kl_loss': total_kl_loss / num_batches
-            }
-        else:
-            metrics = {
-                'loss': float('inf'),
-                'recon_loss': float('inf'),
-                'kl_loss': float('inf')
-            }
-        
-        return metrics
+            avg_loss = total_loss / num_batches
+            avg_recon_loss = total_recon_loss / num_batches
+            avg_kl_loss = total_kl_loss / num_batches
+            self.logger.info(f"验证 - 平均损失: {avg_loss:.6f}, 重建损失: {avg_recon_loss:.6f}, KL损失: {avg_kl_loss:.6f}")
     
     def save_checkpoint(
         self,
