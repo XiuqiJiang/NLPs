@@ -15,7 +15,7 @@ class ESMVAE(nn.Module):
     def __init__(
         self,
         embedding_dim: int = 320,  # 修改为ESM-2的embedding维度
-        latent_dim: int = 64,
+        latent_dim: int = 64,  # 统一使用64维
         hidden_dims: List[int] = [512, 256]
     ) -> None:
         """初始化VAE
@@ -55,16 +55,31 @@ class ESMVAE(nn.Module):
         decoder_layers = []
         in_features = latent_dim
         
-        for h_dim in reversed(hidden_dims):
+        # 第一层：从latent_dim映射到第一个隐藏层维度
+        decoder_layers.extend([
+            nn.Linear(latent_dim, hidden_dims[0]),
+            nn.BatchNorm1d(hidden_dims[0]),
+            nn.ReLU(inplace=True)
+        ])
+        
+        # 后续层
+        for h_dim in reversed(hidden_dims[1:]):
             decoder_layers.extend([
-                nn.Linear(in_features, h_dim),
+                nn.Linear(hidden_dims[0], h_dim),
                 nn.BatchNorm1d(h_dim),
                 nn.ReLU(inplace=True)
             ])
-            in_features = h_dim
         
-        decoder_layers.append(nn.Linear(hidden_dims[0], embedding_dim))
+        # 最后一层：映射回embedding维度
+        decoder_layers.append(nn.Linear(hidden_dims[-1], embedding_dim))
         self.decoder = nn.Sequential(*decoder_layers)
+        
+        # 打印模型结构
+        print(f"VAE模型结构:")
+        print(f"隐变量维度: {latent_dim}")
+        print(f"隐藏层维度: {hidden_dims}")
+        print(f"输入维度: {embedding_dim}")
+        print(f"解码器结构: {self.decoder}")
     
     def encode(self, x: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
         """编码输入数据

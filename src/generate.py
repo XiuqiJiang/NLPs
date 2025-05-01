@@ -11,21 +11,20 @@ from typing import Dict, Any, List
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(root_dir)
 
-# 默认配置值
-NUM_SAMPLES = 10
-LATENT_DIM = 64  # 修改为与VAE模型匹配的维度
-MAX_SEQUENCE_LENGTH = 64
-MODEL_WEIGHTS_PATH = '/content/NLPs/results/models/vae/weights/checkpoint_epoch_95.pth'
-GENERATED_SEQUENCES_PATH = 'results/generated/sequences.txt'
-ESM_MODEL_NAME = "facebook/esm2_t30_150M_UR50D"  # 使用正确的ESM模型
-RANDOM_SEED = 42
-
 try:
-    from config.model_config import *
-    from config.train_config import *
-    from config.data_config import *
+    from config.config import *
+    print("成功导入配置文件")
+    print(f"从配置文件导入的LATENT_DIM: {LATENT_DIM}")
 except ImportError:
-    print("Warning: Could not import from config files. Using default values.")
+    print("Warning: Could not import from config file. Using default values.")
+    # 默认配置值
+    LATENT_DIM = 64
+    MAX_SEQUENCE_LENGTH = 64
+    NUM_SAMPLES = 10
+    MODEL_WEIGHTS_PATH = '/content/NLPs/results/models/vae/weights/checkpoint_epoch_95.pth'
+    GENERATED_SEQUENCES_PATH = 'results/generated/sequences.txt'
+    ESM_MODEL_NAME = "facebook/esm2_t30_150M_UR50D"
+    RANDOM_SEED = 42
 
 from src.models.vae import ESMVAE
 from src.utils.data_utils import load_sequences, create_data_loaders
@@ -67,6 +66,8 @@ def generate_sequences(
     """
     print(f"开始生成序列，使用设备: {device}")
     print(f"生成参数: num_samples={num_samples}")
+    print(f"确认LATENT_DIM: {LATENT_DIM}")
+    print(f"模型隐变量维度: {model.latent_dim}")
     
     model.eval()
     sequences = []
@@ -78,21 +79,14 @@ def generate_sequences(
             start_time = datetime.now()
             
             # 从先验分布采样
-            z = torch.randn(1, LATENT_DIM).to(device)
+            z = torch.randn(1, model.latent_dim).to(device)
+            print(f"采样维度: {z.shape}")
             
             # 生成序列
-            embeddings = model.decode(z)
-            
-            # 使用ESM模型生成序列
-            outputs = model.esm_model.generate(
-                inputs_embeds=embeddings,
-                max_length=MAX_SEQUENCE_LENGTH,
-                do_sample=True,
-                num_return_sequences=1
-            )
+            sequence = model.decode(z)
             
             # 解码序列
-            sequence = tokenizer.decode(outputs[0], skip_special_tokens=True)
+            sequence = tokenizer.decode(sequence[0].tolist())
             sequences.append(sequence)
             unique_sequences.add(sequence)
             

@@ -4,12 +4,10 @@ import numpy as np
 from transformers import AutoTokenizer
 from datetime import datetime
 
-from config.model_config import *
-from config.train_config import *
-from config.data_config import *
+from config.config import *
 from src.models.vae import ESMVAE
-from NLPs.src.utils.data_utils import load_sequences, get_esm_embeddings, create_data_loaders
-from NLPs.src.utils.trainer import VAETrainer
+from src.utils.data_utils import load_sequences, get_esm_embeddings, create_data_loaders
+from src.utils.trainer import VAETrainer
 
 def main() -> None:
     """主训练函数"""

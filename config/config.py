@@ -1,28 +1,44 @@
-# 数据参数
+# 基础配置
+RANDOM_SEED = 42
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# 数据配置
 DATA_PATH = 'data/raw/NLP_sequences_no cesin.txt'
 MAX_SEQUENCE_LENGTH = 64
 ALPHABET = 'ACDEFGHIKLMNPQRSTVWY'
+TRAIN_TEST_SPLIT = 0.15
 
-# ESM模型参数
-ESM_MODEL_NAME = "esm_model"  # 相对路径
+# ESM模型配置
+ESM_MODEL_NAME = "facebook/esm2_t30_150M_UR50D"
 ESM_OUTPUT_DIR = "results/models/esm_finetuned"
 ESM_FINETUNE_EPOCHS = 6
 ESM_BATCH_SIZE = 16
 ESM_LEARNING_RATE = 1e-5
 
-# VAE模型参数
-LATENT_DIM = 50
+# VAE模型配置
+LATENT_DIM = 64
 HIDDEN_DIM = 256
 VAE_BATCH_SIZE = 32
 VAE_LEARNING_RATE = 0.001
 VAE_EPOCHS = 100
-KL_WEIGHT = 0.1  # KL散度的权重
+KL_WEIGHT = 0.1
 
-# 训练参数
-TRAIN_TEST_SPLIT = 0.15
-RANDOM_SEED = 42
+# 训练配置
+SAVE_EVERY = 5
+EARLY_STOPPING_PATIENCE = 10
+GRADIENT_CLIPPING = 1.0
+METRICS = ['loss', 'recon_loss', 'kl_loss']
 
-# 生成参数
+# 模型保存配置
+MODEL_SAVE_DIR = 'results/models/vae/weights'
+MODEL_SAVE_FREQUENCY = 5
+MODEL_WEIGHTS_PATH = '/content/NLPs/results/models/vae/weights/checkpoint_epoch_95.pth'
+
+# 生成配置
 NUM_SAMPLES = 10
-MODEL_WEIGHTS_PATH = 'results/models/vae/weights/epoch_100.pth'
-GENERATED_SEQUENCES_PATH = 'results/generated/sequences.txt' 
+GENERATED_SEQUENCES_PATH = 'results/generated/sequences.txt'
+
+# 日志配置
+LOG_DIR = 'results/logs'
+LOG_LEVEL = 'INFO'
+PROGRESS_BAR = True 
