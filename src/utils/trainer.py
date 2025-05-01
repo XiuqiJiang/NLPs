@@ -147,9 +147,6 @@ class VAETrainer:
             train_loader: 训练数据加载器
         """
         self.model.train()
-        total_loss = 0
-        total_recon_loss = 0
-        total_kl_loss = 0
         
         for batch in train_loader:
             # 将数据移到GPU
@@ -161,27 +158,14 @@ class VAETrainer:
             
             # 计算损失
             embeddings_batch = batch['embeddings']
-            recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)  # 直接使用MSE损失
+            recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)
             kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
-            loss = recon_loss + KL_WEIGHT * kl_loss  # 使用全局KL_WEIGHT
+            loss = recon_loss + KL_WEIGHT * kl_loss
             
             # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
-            
-            # 更新统计信息
-            total_loss += loss.item()
-            total_recon_loss += recon_loss.item()
-            total_kl_loss += kl_loss.item()
-        
-        # 计算平均损失
-        num_batches = len(train_loader)
-        if num_batches > 0:
-            avg_loss = total_loss / num_batches
-            avg_recon_loss = total_recon_loss / num_batches
-            avg_kl_loss = total_kl_loss / num_batches
-            self.logger.info(f"训练 - 平均损失: {avg_loss:.6f}, 重建损失: {avg_recon_loss:.6f}, KL损失: {avg_kl_loss:.6f}")
 
     def validate(
         self,
@@ -193,9 +177,6 @@ class VAETrainer:
             val_loader: 验证数据加载器
         """
         self.model.eval()
-        total_loss = 0
-        total_recon_loss = 0
-        total_kl_loss = 0
         
         with torch.no_grad():
             for batch in val_loader:
@@ -214,25 +195,12 @@ class VAETrainer:
                         recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)
                         kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
                         loss = recon_loss + KL_WEIGHT * kl_loss
-                        
-                        # 更新统计信息
-                        total_loss += loss.item()
-                        total_recon_loss += recon_loss.item()
-                        total_kl_loss += kl_loss.item()
                     else:
                         self.logger.error(f"验证加载器中遇到意外的批次格式: {type(batch)}")
                         continue
                 except Exception as e:
                     self.logger.error(f"处理批次时出错: {str(e)}")
                     continue
-        
-        # 计算平均损失
-        num_batches = len(val_loader)
-        if num_batches > 0:
-            avg_loss = total_loss / num_batches
-            avg_recon_loss = total_recon_loss / num_batches
-            avg_kl_loss = total_kl_loss / num_batches
-            self.logger.info(f"验证 - 平均损失: {avg_loss:.6f}, 重建损失: {avg_recon_loss:.6f}, KL损失: {avg_kl_loss:.6f}")
     
     def save_checkpoint(
         self,
