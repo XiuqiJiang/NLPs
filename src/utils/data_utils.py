@@ -84,49 +84,30 @@ class EmbeddingDataset(Dataset):
     def __len__(self) -> int:
         return len(self.embeddings)
 
-    def __getitem__(self, idx: int) -> Dict[str, Any]:
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """获取数据项
 
         Args:
             idx: 索引
 
         Returns:
-            包含 'embeddings' (Tensor[embed_dim]) 和 'sequence' (Tensor[max_length]) 的字典。
-            注意: 'sequence' 是使用 ord() 编码并填充的，可能不是 VAE 模型直接需要的。
+            包含 'embeddings' (Tensor[embed_dim]) 的字典
         """
         # 获取预计算的 embedding (应为 1D Tensor [embed_dim])
         embedding = self.embeddings[idx]
 
-        # --- 处理序列字符串 (可选, VAE可能只需要embedding) ---
-        sequence_str = self.sequences[idx]
-        # 使用 ord() 编码并填充/截断到 self.max_length
-        # 注意：这种编码方式可能不是最优的
-        sequence_tensor = torch.zeros(self.max_length, dtype=torch.long)
-        try:
-            # 确保 sequence_str 是字符串
-            if not isinstance(sequence_str, str):
-                 sequence_str = str(sequence_str) # 尝试转换
-            sequence_encoded = torch.tensor([ord(c) for c in sequence_str], dtype=torch.long)
-            seq_len = len(sequence_encoded)
-            copy_len = min(seq_len, self.max_length)
-            sequence_tensor[:copy_len] = sequence_encoded[:copy_len]
-        except Exception as e:
-            print(f"警告: 处理索引 {idx} 的序列 '{sequence_str[:50]}...' 时出错: {e}. 返回全零张量。")
-            # 保留全零张量
-
-        # --- 返回字典 ---
         # 确保 embedding 是 1D
         if embedding.ndim != 1:
-             print(f"警告: 索引 {idx} 的 Embedding 维度不是 1 (实际为 {embedding.ndim}). "
-                   f"形状: {embedding.shape}. 可能导致 collate 错误。")
-             # 尝试修正: 如果是 [1, dim]，则 squeeze
-             if embedding.shape[0] == 1 and embedding.ndim == 2:
-                 embedding = embedding.squeeze(0)
-             # 如果是其他奇怪形状，这里可能需要更复杂的处理或报错
+            print(f"警告: 索引 {idx} 的 Embedding 维度不是 1 (实际为 {embedding.ndim}). "
+                  f"形状: {embedding.shape}. 尝试修正...")
+            # 尝试修正: 如果是 [1, dim]，则 squeeze
+            if embedding.shape[0] == 1 and embedding.ndim == 2:
+                embedding = embedding.squeeze(0)
+            else:
+                raise ValueError(f"无法处理维度为 {embedding.ndim} 的 embedding")
 
         return {
-            'embeddings': embedding,    # 形状: [embed_dim]
-            'sequence': sequence_tensor # 形状: [max_length]
+            'embeddings': embedding    # 形状: [embed_dim]
         }
 
 # --- 数据加载函数 ---

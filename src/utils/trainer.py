@@ -207,31 +207,47 @@ class VAETrainer:
         
         with torch.no_grad():
             for batch in val_loader:
-                # 将数据移到GPU
-                batch = {k: v.to(self.device) for k, v in batch.items()}
-                
-                # 前向传播
-                outputs = self.model(batch)
-                reconstructed_batch, mean, logvar = outputs
-                
-                # 计算损失
-                embeddings_batch = batch['embeddings']
-                recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)
-                kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
-                loss = recon_loss + KL_WEIGHT * kl_loss
-                
-                # 更新统计信息
-                total_loss += loss.item()
-                total_recon_loss += recon_loss.item()
-                total_kl_loss += kl_loss.item()
+                try:
+                    # 检查批次格式
+                    if isinstance(batch, dict):
+                        # 将数据移到GPU
+                        batch = {k: v.to(self.device) for k, v in batch.items()}
+                        
+                        # 前向传播
+                        outputs = self.model(batch)
+                        reconstructed_batch, mean, logvar = outputs
+                        
+                        # 计算损失
+                        embeddings_batch = batch['embeddings']
+                        recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)
+                        kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
+                        loss = recon_loss + KL_WEIGHT * kl_loss
+                        
+                        # 更新统计信息
+                        total_loss += loss.item()
+                        total_recon_loss += recon_loss.item()
+                        total_kl_loss += kl_loss.item()
+                    else:
+                        self.logger.error(f"验证加载器中遇到意外的批次格式: {type(batch)}")
+                        continue
+                except Exception as e:
+                    self.logger.error(f"处理批次时出错: {str(e)}")
+                    continue
         
         # 计算平均损失
         num_batches = len(val_loader)
-        metrics = {
-            'loss': total_loss / num_batches,
-            'recon_loss': total_recon_loss / num_batches,
-            'kl_loss': total_kl_loss / num_batches
-        }
+        if num_batches > 0:
+            metrics = {
+                'loss': total_loss / num_batches,
+                'recon_loss': total_recon_loss / num_batches,
+                'kl_loss': total_kl_loss / num_batches
+            }
+        else:
+            metrics = {
+                'loss': float('inf'),
+                'recon_loss': float('inf'),
+                'kl_loss': float('inf')
+            }
         
         return metrics
     
