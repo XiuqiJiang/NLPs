@@ -21,7 +21,7 @@ class EmbeddingDataset(Dataset):
         self,
         embeddings: torch.Tensor,
         sequences: List[str],
-        max_length: int = 64  # 修改为64
+        max_length: int = 64
     ) -> None:
         """初始化数据集
         
@@ -34,6 +34,9 @@ class EmbeddingDataset(Dataset):
         self.embeddings = embeddings
         self.sequences = sequences
         self.max_length = max_length
+        
+        # 打印embeddings的形状以进行调试
+        print(f"Embeddings shape in dataset: {self.embeddings.shape}")
     
     def __len__(self) -> int:
         return len(self.embeddings)
@@ -47,14 +50,21 @@ class EmbeddingDataset(Dataset):
         Returns:
             包含embeddings和序列的字典
         """
+        # 获取embeddings
+        embedding = self.embeddings[idx]
+        
         # 将序列转换为张量并填充到固定长度
         sequence = self.sequences[idx]
         sequence_tensor = torch.zeros(self.max_length, dtype=torch.long)  # 创建全零张量
         sequence_encoded = torch.tensor([ord(c) for c in sequence], dtype=torch.long)  # 编码序列
         sequence_tensor[:min(len(sequence_encoded), self.max_length)] = sequence_encoded[:self.max_length]  # 填充序列
         
+        # 打印单个样本的形状以进行调试
+        if idx == 0:
+            print(f"Sample {idx} - Embedding shape: {embedding.shape}, Sequence shape: {sequence_tensor.shape}")
+        
         return {
-            'embeddings': self.embeddings[idx],
+            'embeddings': embedding,  # 直接返回预计算的embedding
             'sequence': sequence_tensor
         }
 
@@ -94,7 +104,7 @@ def create_data_loaders(
     train_test_split: float = 0.15,
     num_workers: int = NUM_WORKERS,
     pin_memory: bool = PIN_MEMORY,
-    max_sequence_length: int = 64  # 修改为64
+    max_sequence_length: int = 64
 ) -> Tuple[DataLoader, DataLoader]:
     """创建数据加载器
     
@@ -110,6 +120,9 @@ def create_data_loaders(
     Returns:
         训练和验证数据加载器
     """
+    # 打印输入embeddings的形状以进行调试
+    print(f"Input embeddings shape: {embeddings.shape}")
+    
     # 划分训练集和验证集
     indices = np.arange(len(embeddings))
     np.random.shuffle(indices)
