@@ -170,13 +170,18 @@ class VAETrainer:
     def validate(
         self,
         val_loader: torch.utils.data.DataLoader
-    ) -> None:
+    ) -> float:
         """验证模型
         
         Args:
             val_loader: 验证数据加载器
+            
+        Returns:
+            验证损失
         """
         self.model.eval()
+        total_loss = 0.0
+        num_batches = 0
         
         with torch.no_grad():
             for batch in val_loader:
@@ -195,12 +200,19 @@ class VAETrainer:
                         recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)
                         kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
                         loss = recon_loss + KL_WEIGHT * kl_loss
+                        
+                        total_loss += loss.item()
+                        num_batches += 1
                     else:
                         self.logger.error(f"验证加载器中遇到意外的批次格式: {type(batch)}")
                         continue
                 except Exception as e:
                     self.logger.error(f"处理批次时出错: {str(e)}")
                     continue
+        
+        avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
+        self.logger.info(f"验证损失: {avg_loss:.6f}")
+        return avg_loss
     
     def save_checkpoint(
         self,
@@ -252,16 +264,16 @@ class VAETrainer:
             # 训练
             self.train_epoch(train_loader)
             
-            # 验证
-            self.validate(val_loader)
+            # 验证并获取损失
+            val_loss = self.validate(val_loader)
             
             # 记录当前epoch
-            self.logger.info(f'Epoch {epoch} 完成')
+            self.logger.info(f'Epoch {epoch} 完成，验证损失: {val_loss:.6f}')
             
             # 定期保存模型
             if epoch % save_every == 0:
                 self.save_checkpoint(
                     epoch,
-                    float('inf')
+                    val_loss
                 )
                 self.logger.info(f"保存第 {epoch} 轮模型") 
