@@ -1,75 +1,154 @@
-import os
 import torch
-import numpy as np
-from transformers import AutoTokenizer
+import torch.nn as nn
+from torch.utils.data import DataLoader
+from torch.optim import Adam
+from tqdm import tqdm
+import os
 from datetime import datetime
+from typing import Tuple
 
-from config.config import *
-from src.models.vae import ESMVAE
-from src.utils.data_utils import load_sequences, get_esm_embeddings, create_data_loaders
-from src.utils.trainer import VAETrainer
+from models.vae_token import ESMVAEToken, vae_token_loss
+from data.dataset import ProteinDataset
+from config.config import (
+    BATCH_SIZE,
+    NUM_EPOCHS,
+    LEARNING_RATE,
+    KL_WEIGHT,
+    SAVE_DIR,
+    ESM_MODEL_NAME
+)
+from utils.logger import setup_logger
 
-def main() -> None:
-    """主训练函数"""
-    # 设置随机种子
-    torch.manual_seed(RANDOM_SEED)
-    np.random.seed(RANDOM_SEED)
+def train_epoch(
+    model: nn.Module,
+    dataloader: DataLoader,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    kl_weight: float
+) -> Tuple[float, float, float]:
+    """训练一个epoch
     
+    Args:
+        model: VAE模型
+        dataloader: 数据加载器
+        optimizer: 优化器
+        device: 设备
+        kl_weight: KL散度权重
+        
+    Returns:
+        平均总损失、重建损失和KL散度
+    """
+    model.train()
+    total_loss = 0.0
+    total_recon_loss = 0.0
+    total_kl_loss = 0.0
+    
+    for batch in tqdm(dataloader, desc="Training"):
+        # 将数据移到设备上
+        batch = {k: v.to(device) for k, v in batch.items()}
+        
+        # 前向传播
+        recon_logits, mean, logvar = model(batch)
+        
+        # 计算损失
+        loss, recon_loss, kl_loss = vae_token_loss(
+            recon_logits,
+            batch['input_ids'],
+            mean,
+            logvar,
+            kl_weight,
+            model.tokenizer.pad_token_id
+        )
+        
+        # 反向传播
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+        
+        # 累加损失
+        total_loss += loss.item()
+        total_recon_loss += recon_loss.item()
+        total_kl_loss += kl_loss.item()
+    
+    # 计算平均损失
+    num_batches = len(dataloader)
+    avg_loss = total_loss / num_batches
+    avg_recon_loss = total_recon_loss / num_batches
+    avg_kl_loss = total_kl_loss / num_batches
+    
+    return avg_loss, avg_recon_loss, avg_kl_loss
+
+def main():
     # 设置设备
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"使用设备: {device}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
     
-    # 如果使用GPU，设置CUDA_LAUNCH_BLOCKING=1以便更好的错误追踪
-    if device.type == 'cuda':
-        os.environ['CUDA_LAUNCH_BLOCKING'] = '1'
-        print(f"GPU设备: {torch.cuda.get_device_name(0)}")
-        print(f"GPU内存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    # 创建保存目录
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_dir = os.path.join(SAVE_DIR, timestamp)
+    os.makedirs(save_dir, exist_ok=True)
     
-    print("开始训练...")
+    # 设置日志
+    logger = setup_logger(save_dir)
     
-    # 准备数据
-    print("准备数据...")
-    sequences = load_sequences("/content/NLPs/data/raw/NLP_sequences_no cesin.txt")
-    
-    # 获取ESM embeddings
-    print("正在计算ESM embeddings...")
-    embeddings = get_esm_embeddings(sequences, batch_size=32)
-    print(f"成功加载 {len(sequences)} 个序列")
-    print(f"Embeddings shape: {embeddings.shape}")
-    
-    # 创建数据加载器
-    train_loader, val_loader = create_data_loaders(
-        embeddings=embeddings,
-        sequences=sequences,
-        batch_size=VAE_BATCH_SIZE,
-        train_test_split=TRAIN_TEST_SPLIT,
-        num_workers=NUM_WORKERS,
-        pin_memory=PIN_MEMORY
+    # 加载数据集
+    train_dataset = ProteinDataset(split="train")
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        num_workers=4
     )
-    
-    print(f"训练集大小: {len(train_loader.dataset)}")
-    print(f"验证集大小: {len(val_loader.dataset)}")
     
     # 初始化模型
-    model = ESMVAE().to(device)
+    model = ESMVAEToken().to(device)
     
-    # 优化器
-    optimizer = torch.optim.Adam(model.parameters(), lr=VAE_LEARNING_RATE)
+    # 初始化优化器
+    optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
     
-    # 创建训练器
-    trainer = VAETrainer(
-        model=model,
-        optimizer=optimizer,
-        device=device,
-        model_save_dir=MODEL_SAVE_DIR
-    )
-    
-    # 开始训练
-    trainer.train(
-        train_loader=train_loader,
-        val_loader=val_loader,
-        num_epochs=VAE_EPOCHS
-    )
+    # 训练循环
+    best_loss = float('inf')
+    for epoch in range(NUM_EPOCHS):
+        # 训练一个epoch
+        avg_loss, avg_recon_loss, avg_kl_loss = train_epoch(
+            model,
+            train_dataloader,
+            optimizer,
+            device,
+            KL_WEIGHT
+        )
+        
+        # 记录日志
+        logger.info(
+            f"Epoch {epoch+1}/{NUM_EPOCHS} - "
+            f"Loss: {avg_loss:.4f} - "
+            f"Recon Loss: {avg_recon_loss:.4f} - "
+            f"KL Loss: {avg_kl_loss:.4f}"
+        )
+        
+        # 保存最佳模型
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+            torch.save(
+                {
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'loss': avg_loss,
+                },
+                os.path.join(save_dir, 'best_model.pth')
+            )
+        
+        # 每个epoch保存一次检查点
+        torch.save(
+            {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'loss': avg_loss,
+            },
+            os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth')
+        )
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main() 

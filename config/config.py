@@ -9,6 +9,8 @@ DATA_PATH = 'data/raw/NLP_sequences_no cesin.txt'
 MAX_SEQUENCE_LENGTH = 64
 ALPHABET = 'ACDEFGHIKLMNPQRSTVWY'
 TRAIN_TEST_SPLIT = 0.15
+NUM_WORKERS = 4  # 数据加载的工作进程数
+PIN_MEMORY = True  # 是否将数据固定在内存中，可以加快GPU传输速度
 
 # ESM模型配置
 ESM_MODEL_NAME = "facebook/esm2_t30_150M_UR50D"

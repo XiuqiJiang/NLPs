@@ -5,7 +5,10 @@ import numpy as np
 from transformers import AutoTokenizer
 from datetime import datetime
 import traceback
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+import argparse
+from pathlib import Path
+from tqdm import tqdm
 
 # 添加项目根目录到Python路径
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,7 +29,7 @@ except ImportError:
     ESM_MODEL_NAME = "facebook/esm2_t30_150M_UR50D"
     RANDOM_SEED = 42
 
-from src.models.vae import ESMVAE
+from src.models.vae_token import ESMVAEToken
 from src.utils.data_utils import load_sequences, create_data_loaders
 
 def print_system_info():
@@ -48,129 +51,93 @@ def print_system_info():
     print(f"ESM_MODEL_NAME: {ESM_MODEL_NAME}")
 
 def generate_sequences(
-    model: ESMVAE,
-    tokenizer: AutoTokenizer,
-    device: torch.device,
-    num_samples: int = NUM_SAMPLES
-) -> Dict[str, Any]:
-    """生成序列
+    model: ESMVAEToken,
+    num_sequences: int,
+    max_length: int = 100,
+    temperature: float = 1.0,
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+) -> List[str]:
+    """生成蛋白质序列
     
     Args:
         model: VAE模型
-        tokenizer: 分词器
+        num_sequences: 要生成的序列数量
+        max_length: 最大序列长度
+        temperature: 采样温度
         device: 设备
-        num_samples: 生成序列数量
         
     Returns:
-        生成结果和指标
+        生成的序列列表
     """
-    print(f"开始生成序列，使用设备: {device}")
-    print(f"生成参数: num_samples={num_samples}")
-    print(f"确认LATENT_DIM: {LATENT_DIM}")
-    print(f"模型隐变量维度: {model.latent_dim}")
-    
     model.eval()
     sequences = []
-    total_time = 0
-    unique_sequences = set()
     
     with torch.no_grad():
-        for i in range(num_samples):
-            start_time = datetime.now()
-            
-            # 从先验分布采样
+        for _ in tqdm(range(num_sequences), desc="Generating sequences"):
+            # 从标准正态分布采样隐变量
             z = torch.randn(1, model.latent_dim).to(device)
-            print(f"采样维度: {z.shape}")
             
-            # 生成序列
-            sequence = model.decode(z)
+            # 解码生成logits
+            logits = model.decode(z)  # shape: (1, vocab_size)
             
-            # 解码序列
-            sequence = tokenizer.decode(sequence[0].tolist())
-            sequences.append(sequence)
-            unique_sequences.add(sequence)
+            # 应用温度缩放
+            logits = logits / temperature
             
-            # 计算耗时
-            batch_time = (datetime.now() - start_time).total_seconds()
-            total_time += batch_time
+            # 使用softmax获取概率分布
+            probs = torch.softmax(logits, dim=-1)
             
-            print(f"生成第 {i+1}/{num_samples} 个序列:")
-            print(f"序列长度: {len(sequence)}")
-            print(f"生成耗时: {batch_time:.2f}秒")
-            if torch.cuda.is_available():
-                print(f"GPU内存使用: {torch.cuda.memory_allocated()/1024**2:.2f}MB")
+            # 从概率分布中采样token
+            token_id = torch.multinomial(probs, num_samples=1).item()
+            
+            # 解码token为氨基酸序列
+            sequence = model.tokenizer.decode([token_id])
+            
+            # 移除特殊token
+            sequence = sequence.replace("<pad>", "").replace("<cls>", "").replace("<eos>", "").strip()
+            
+            if sequence:  # 只添加非空序列
+                sequences.append(sequence)
     
-    # 计算指标
-    metrics = {
-        'num_sequences': len(sequences),
-        'avg_length': sum(len(s) for s in sequences) / len(sequences),
-        'unique_sequences': len(unique_sequences)
-    }
-    
-    print("\n生成完成:")
-    print(f"总耗时: {total_time:.2f}秒")
-    print(f"平均每个序列耗时: {total_time/num_samples:.2f}秒")
-    print(f"生成序列总数: {metrics['num_sequences']}")
-    print(f"平均序列长度: {metrics['avg_length']:.2f}")
-    print(f"唯一序列数: {metrics['unique_sequences']}")
-    
-    return sequences, metrics
+    return sequences
 
-def main() -> None:
-    """主函数"""
-    try:
-        print("开始序列生成任务")
-        
-        # 设置随机种子
-        torch.manual_seed(RANDOM_SEED)
-        np.random.seed(RANDOM_SEED)
-        print(f"设置随机种子: {RANDOM_SEED}")
-        
-        # 打印系统信息
-        print_system_info()
-        
-        # 加载tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME)
-        print(f"加载本地ESM模型: {ESM_MODEL_NAME}")
-        
-        # 设置设备
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"使用设备: {device}")
-        
-        # 初始化模型
-        model = ESMVAE().to(device)
-        
-        # 加载模型权重
-        if not os.path.exists(MODEL_WEIGHTS_PATH):
-            print(f"找不到模型权重文件: {MODEL_WEIGHTS_PATH}")
-            print("使用随机初始化的权重")
-        else:
-            checkpoint = torch.load(MODEL_WEIGHTS_PATH, map_location=device)
-            model.load_state_dict(checkpoint['model_state_dict'])
-            print(f"加载模型权重: {MODEL_WEIGHTS_PATH}")
-        
-        # 生成序列
-        sequences, metrics = generate_sequences(
-            model=model,
-            tokenizer=tokenizer,
-            device=device,
-            num_samples=NUM_SAMPLES
-        )
-        
-        # 保存生成的序列
-        os.makedirs(os.path.dirname(GENERATED_SEQUENCES_PATH), exist_ok=True)
-        with open(GENERATED_SEQUENCES_PATH, 'w') as f:
-            for sequence in sequences:
-                f.write(sequence + '\n')
-        
-        print(f"保存生成的序列到: {GENERATED_SEQUENCES_PATH}")
-        print(f"成功生成 {len(sequences)} 个序列，保存至 {GENERATED_SEQUENCES_PATH}")
-        print("序列生成任务完成")
-        
-    except Exception as e:
-        print(f"序列生成任务失败: {str(e)}")
-        print(f"错误类型: {type(e).__name__}")
-        print(f"错误位置: {traceback.format_exc()}")
+def main():
+    parser = argparse.ArgumentParser(description="使用VAE生成蛋白质序列")
+    parser.add_argument("--model_path", type=str, required=True, help="模型权重路径")
+    parser.add_argument("--num_sequences", type=int, default=10, help="要生成的序列数量")
+    parser.add_argument("--max_length", type=int, default=100, help="最大序列长度")
+    parser.add_argument("--temperature", type=float, default=1.0, help="采样温度")
+    parser.add_argument("--output_file", type=str, default="generated_sequences.txt", help="输出文件路径")
+    args = parser.parse_args()
+    
+    # 设置设备
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+    
+    # 加载模型
+    model = ESMVAEToken().to(device)
+    checkpoint = torch.load(args.model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"Loaded model from {args.model_path}")
+    
+    # 生成序列
+    sequences = generate_sequences(
+        model,
+        args.num_sequences,
+        args.max_length,
+        args.temperature,
+        device
+    )
+    
+    # 保存序列
+    output_path = Path(args.output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    with open(output_path, "w") as f:
+        for i, seq in enumerate(sequences, 1):
+            f.write(f">Generated_sequence_{i}\n")
+            f.write(f"{seq}\n")
+    
+    print(f"Generated {len(sequences)} sequences and saved to {output_path}")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main() 
