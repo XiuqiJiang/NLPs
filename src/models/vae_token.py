@@ -12,125 +12,149 @@ from config.config import (
 )
 
 class ESMVAEToken(nn.Module):
-    """基于 ESM embeddings 的 VAE 模型，输出 token 序列"""
+    """基于ESM嵌入的VAE模型，输出token序列"""
     
     def __init__(
         self,
-        embedding_dim: int,
+        input_dim: int,
+        hidden_dims: list,
         latent_dim: int,
-        hidden_dims: List[int],
         vocab_size: int,
         max_sequence_length: int,
-        use_layer_norm: bool = True
-    ) -> None:
-        """初始化 VAE 模型
+        pad_token_id: int,
+        use_layer_norm: bool = True,
+        dropout: float = 0.1
+    ):
+        """初始化VAE模型
         
         Args:
-            embedding_dim: 输入 embedding 的维度
-            latent_dim: 潜在空间的维度
-            hidden_dims: 编码器和解码器的隐藏层维度列表
-            vocab_size: 词汇表大小（包括特殊 token）
+            input_dim: 输入维度（ESM嵌入维度）
+            hidden_dims: 隐藏层维度列表
+            latent_dim: 潜在空间维度
+            vocab_size: 词汇表大小
             max_sequence_length: 最大序列长度
-            use_layer_norm: 是否使用 LayerNorm（默认为 True）
+            pad_token_id: padding token的ID
+            use_layer_norm: 是否使用LayerNorm
+            dropout: dropout比率
         """
         super().__init__()
-        
-        self.embedding_dim = embedding_dim
-        self.latent_dim = latent_dim
+        self.input_dim = input_dim
         self.hidden_dims = hidden_dims
+        self.latent_dim = latent_dim
         self.vocab_size = vocab_size
         self.max_sequence_length = max_sequence_length
+        self.pad_token_id = pad_token_id
         self.use_layer_norm = use_layer_norm
         
         # 构建编码器和解码器
         self.encoder = self.build_encoder()
         self.decoder = self.build_decoder()
         
-        # 编码器的最终层（均值和对数方差）
+        # 编码器输出层
         self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
-        self.fc_var = nn.Linear(hidden_dims[-1], latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dims[-1], latent_dim)
+        
+        # 解码器输出层
+        self.fc_out = nn.Linear(hidden_dims[-1], max_sequence_length * vocab_size)
+        
+        # 初始化权重
+        self.apply(self._init_weights)
     
-    def build_encoder(self) -> nn.Sequential:
-        """构建编码器网络
+    def build_encoder(self) -> nn.Module:
+        """构建编码器网络"""
+        layers = []
+        in_dim = self.input_dim
         
-        Returns:
-            编码器网络
-        """
-        modules = []
-        in_features = self.embedding_dim
+        for hidden_dim in self.hidden_dims:
+            layers.extend([
+                nn.Linear(in_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim) if self.use_layer_norm else nn.BatchNorm1d(hidden_dim),
+                nn.LeakyReLU(),
+                nn.Dropout(0.1)
+            ])
+            in_dim = hidden_dim
         
-        # 添加隐藏层
-        for h_dim in self.hidden_dims:
-            # 对每个 token 的 embedding 进行线性变换
-            modules.append(nn.Linear(in_features, h_dim))
-            modules.append(nn.ReLU())
-            
-            if self.use_layer_norm:
-                # 使用 LayerNorm 处理序列数据
-                modules.append(nn.LayerNorm(h_dim))
-            else:
-                # 使用 BatchNorm1d，需要调整维度
-                modules.append(nn.BatchNorm1d(h_dim))
-            
-            in_features = h_dim
-        
-        # 添加池化层，将序列信息压缩成一个向量
-        modules.append(nn.Sequential(
-            nn.Linear(in_features, in_features),  # 可选的全连接层
-            nn.ReLU(),
-            nn.LayerNorm(in_features) if self.use_layer_norm else nn.BatchNorm1d(in_features)
-        ))
-        
-        return nn.Sequential(*modules)
+        return nn.Sequential(*layers)
     
-    def build_decoder(self) -> nn.Sequential:
-        """构建解码器网络
+    def build_decoder(self) -> nn.Module:
+        """构建解码器网络"""
+        layers = []
+        in_dim = self.latent_dim
         
-        Returns:
-            解码器网络
-        """
-        modules = []
-        in_features = self.latent_dim
+        for hidden_dim in reversed(self.hidden_dims):
+            layers.extend([
+                nn.Linear(in_dim, hidden_dim),
+                nn.LayerNorm(hidden_dim) if self.use_layer_norm else nn.BatchNorm1d(hidden_dim),
+                nn.LeakyReLU(),
+                nn.Dropout(0.1)
+            ])
+            in_dim = hidden_dim
         
-        # 添加隐藏层
-        for h_dim in reversed(self.hidden_dims):
-            modules.append(nn.Linear(in_features, h_dim))
-            modules.append(nn.ReLU())
-            
-            if self.use_layer_norm:
-                modules.append(nn.LayerNorm(h_dim))
-            else:
-                modules.append(nn.BatchNorm1d(h_dim))
-            
-            in_features = h_dim
-        
-        # 添加输出层，将隐藏状态映射到 token logits
-        modules.append(nn.Linear(in_features, self.max_sequence_length * self.vocab_size))
-        
-        return nn.Sequential(*modules)
+        return nn.Sequential(*layers)
     
-    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _init_weights(self, module):
+        """初始化模型权重"""
+        if isinstance(module, nn.Linear):
+            nn.init.xavier_uniform_(module.weight)
+            if module.bias is not None:
+                nn.init.zeros_(module.bias)
+    
+    def encode(self, x: torch.Tensor, attention_mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """编码输入序列
         
         Args:
-            x: 输入序列，形状为 [batch_size, seq_len, embedding_dim]
+            x: 输入张量，形状为 [batch_size, seq_len, input_dim]
+            attention_mask: 注意力掩码，形状为 [batch_size, seq_len]
             
         Returns:
-            均值和对数方差，形状均为 [batch_size, latent_dim]
+            mu: 均值，形状为 [batch_size, latent_dim]
+            logvar: 对数方差，形状为 [batch_size, latent_dim]
         """
-        batch_size = x.size(0)
+        # 验证输入形状
+        if x.dim() != 3:
+            raise ValueError(f"输入张量必须是3维的 [batch_size, seq_len, input_dim]，但收到了 {x.shape}")
+        if x.size(-1) != self.input_dim:
+            raise ValueError(f"输入维度必须是 {self.input_dim}，但收到了 {x.size(-1)}")
         
-        # 对每个 token 的 embedding 进行编码
-        x = self.encoder(x)  # [batch_size, seq_len, hidden_dim]
+        # 验证注意力掩码
+        if attention_mask is not None:
+            if attention_mask.shape != x.shape[:2]:
+                raise ValueError(f"注意力掩码形状 {attention_mask.shape} 与输入形状 {x.shape[:2]} 不匹配")
+            if attention_mask.dtype != torch.long:
+                raise ValueError(f"注意力掩码必须是长整型，但收到了 {attention_mask.dtype}")
         
-        # 使用平均池化将序列信息压缩成一个向量
-        x = torch.mean(x, dim=1)  # [batch_size, hidden_dim]
+        # 使用注意力掩码进行池化
+        if attention_mask is not None:
+            # 将掩码扩展到与输入相同的维度
+            mask = attention_mask.unsqueeze(-1).float()
+            # 计算掩码下的平均值
+            x = (x * mask).sum(dim=1) / (mask.sum(dim=1) + 1e-8)  # 添加小量避免除零
+        else:
+            # 如果没有掩码，直接取平均值
+            x = x.mean(dim=1)
+        
+        # 通过编码器网络
+        x = self.encoder(x)
         
         # 计算均值和方差
         mu = self.fc_mu(x)
-        log_var = self.fc_var(x)
+        logvar = self.fc_logvar(x)
         
-        return mu, log_var
+        return mu, logvar
+    
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        """重参数化技巧
+        
+        Args:
+            mu: 均值
+            logvar: 对数方差
+            
+        Returns:
+            z: 采样的潜在向量
+        """
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
     
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         """解码潜在向量
@@ -139,51 +163,55 @@ class ESMVAEToken(nn.Module):
             z: 潜在向量，形状为 [batch_size, latent_dim]
             
         Returns:
-            解码后的序列 logits，形状为 [batch_size, seq_len, vocab_size]
+            logits: 输出logits，形状为 [batch_size, max_sequence_length, vocab_size]
         """
+        # 验证输入形状
+        if z.dim() != 2:
+            raise ValueError(f"潜在向量必须是2维的 [batch_size, latent_dim]，但收到了 {z.shape}")
+        if z.size(-1) != self.latent_dim:
+            raise ValueError(f"潜在维度必须是 {self.latent_dim}，但收到了 {z.size(-1)}")
+        
         # 通过解码器网络
-        x = self.decoder(z)  # [batch_size, seq_len * vocab_size]
+        x = self.decoder(z)
         
-        # 重塑为序列形式
-        x = x.view(-1, self.max_sequence_length, self.vocab_size)
+        # 通过输出层并重塑
+        logits = self.fc_out(x)
+        logits = logits.view(-1, self.max_sequence_length, self.vocab_size)
         
-        return x
+        # 验证输出形状
+        if logits.size(-1) != self.vocab_size:
+            raise ValueError(f"输出维度必须是 {self.vocab_size}，但收到了 {logits.size(-1)}")
+        if logits.size(1) != self.max_sequence_length:
+            raise ValueError(f"序列长度必须是 {self.max_sequence_length}，但收到了 {logits.size(1)}")
+        
+        return logits
     
-    def reparameterize(self, mu: torch.Tensor, log_var: torch.Tensor) -> torch.Tensor:
-        """重参数化技巧
-        
-        Args:
-            mu: 均值，形状为 [batch_size, latent_dim]
-            log_var: 对数方差，形状为 [batch_size, latent_dim]
-            
-        Returns:
-            采样得到的潜在向量，形状为 [batch_size, latent_dim]
-        """
-        std = torch.exp(0.5 * log_var)
-        eps = torch.randn_like(std)
-        return mu + eps * std
-    
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        x: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """前向传播
         
         Args:
-            x: 输入序列，形状为 [batch_size, seq_len, embedding_dim]
+            x: 输入张量，形状为 [batch_size, seq_len, input_dim]
+            attention_mask: 注意力掩码，形状为 [batch_size, seq_len]
             
         Returns:
-            (重构序列, 均值, 对数方差)
-            重构序列形状为 [batch_size, seq_len, vocab_size]
-            均值和方差形状均为 [batch_size, latent_dim]
+            logits: 重建的logits，形状为 [batch_size, max_sequence_length, vocab_size]
+            mu: 均值
+            logvar: 对数方差
         """
         # 编码
-        mu, log_var = self.encode(x)
+        mu, logvar = self.encode(x, attention_mask)
         
         # 重参数化
-        z = self.reparameterize(mu, log_var)
+        z = self.reparameterize(mu, logvar)
         
         # 解码
-        x_recon = self.decode(z)
+        logits = self.decode(z)
         
-        return x_recon, mu, log_var
+        return logits, mu, logvar
 
 def vae_token_loss(
     recon_logits: torch.Tensor,

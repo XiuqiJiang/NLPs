@@ -334,7 +334,7 @@ def prepare_VAE_data(
 def preprocess_and_embed(
     sequences: List[str],
     output_path: str,
-    model_name: str = ESM_MODEL_NAME,
+    model_path: str = ESM_MODEL_PATH,
     batch_size: int = 32,
     max_length: int = MAX_SEQUENCE_LENGTH
 ) -> None:
@@ -343,18 +343,45 @@ def preprocess_and_embed(
     Args:
         sequences: 氨基酸序列列表
         output_path: 输出文件路径
-        model_name: ESM 模型名称
+        model_path: ESM 模型路径
         batch_size: 批处理大小
-        max_length: 最大序列长度
+        max_length: 最大序列长度（包括特殊token）
     """
     print(f"开始预处理 {len(sequences)} 个序列...")
     
-    # 生成 embeddings 和 masks
-    embeddings, attention_masks = get_esm_embeddings(
-        sequences=sequences,
-        model_path=ESM_MODEL_PATH,
-        device=DEVICE
-    )
+    # 验证序列长度
+    for i, seq in enumerate(sequences):
+        if len(seq) > max_length - 1:  # -1 是为了留出EOS token的位置
+            print(f"警告: 序列 {i} 长度 ({len(seq)}) 超过最大长度 ({max_length-1})，将被截断")
+    
+    # 验证序列字符
+    valid_chars = set(ALPHABET[2:])  # 排除特殊token
+    for i, seq in enumerate(sequences):
+        invalid_chars = set(seq) - valid_chars
+        if invalid_chars:
+            raise ValueError(f"序列 {i} 包含无效字符: {invalid_chars}")
+    
+    # 加载模型和tokenizer
+    model = AutoModelForMaskedLM.from_pretrained(model_path).to(DEVICE)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    
+    # 对序列进行编码
+    inputs = tokenizer(
+        sequences,
+        padding=True,
+        truncation=True,
+        max_length=max_length,
+        return_tensors="pt"
+    ).to(DEVICE)
+    
+    # 获取注意力掩码
+    attention_masks = inputs['attention_mask']
+    
+    # 获取嵌入表示
+    with torch.no_grad():
+        outputs = model(**inputs, output_hidden_states=True)
+        # 使用最后一层的隐藏状态作为嵌入
+        embeddings = outputs.hidden_states[-1]
     
     # 生成 token IDs
     token_ids = []
@@ -367,19 +394,49 @@ def preprocess_and_embed(
     
     token_ids = torch.tensor(token_ids, dtype=torch.long)
     
+    # 验证数据形状
+    print(f"验证数据形状:")
+    print(f"Embeddings: {embeddings.shape}")  # [batch_size, seq_len, embed_dim]
+    print(f"Attention masks: {attention_masks.shape}")  # [batch_size, seq_len]
+    print(f"Token IDs: {token_ids.shape}")  # [batch_size, seq_len]
+    
+    # 验证 token IDs 的有效性
+    assert token_ids.max() < VOCAB_SIZE, f"Token IDs 包含超出词汇表大小的值: {token_ids.max()} >= {VOCAB_SIZE}"
+    assert token_ids.min() >= 0, f"Token IDs 包含负值: {token_ids.min()}"
+    
+    # 验证序列长度
+    assert embeddings.shape[1] == max_length, f"Embeddings 序列长度 ({embeddings.shape[1]}) 与 max_length ({max_length}) 不匹配"
+    assert attention_masks.shape[1] == max_length, f"Attention masks 序列长度 ({attention_masks.shape[1]}) 与 max_length ({max_length}) 不匹配"
+    assert token_ids.shape[1] == max_length, f"Token IDs 序列长度 ({token_ids.shape[1]}) 与 max_length ({max_length}) 不匹配"
+    
+    # 验证特殊token
+    for i, ids in enumerate(token_ids):
+        if ids[-1] != PAD_TOKEN_ID:
+            print(f"警告: 序列 {i} 的最后一个token不是PAD token")
+        if EOS_TOKEN_ID not in ids:
+            print(f"警告: 序列 {i} 中没有EOS token")
+    
     # 保存到文件
     data = {
-        'embeddings': embeddings,
-        'attention_masks': attention_masks,
-        'token_ids': token_ids,
-        'sequences': sequences
+        'embeddings': embeddings.cpu(),
+        'attention_masks': attention_masks.cpu(),
+        'token_ids': token_ids.cpu(),
+        'sequences': sequences,
+        'config': {
+            'max_length': max_length,
+            'vocab_size': VOCAB_SIZE,
+            'pad_token_id': PAD_TOKEN_ID,
+            'eos_token_id': EOS_TOKEN_ID
+        }
     }
     
     torch.save(data, output_path)
     print(f"数据已保存到 {output_path}")
-    print(f"Embeddings 形状: {embeddings.shape}")
-    print(f"Attention masks 形状: {attention_masks.shape}")
-    print(f"Token IDs 形状: {token_ids.shape}")
+    print(f"配置信息:")
+    print(f"- 最大序列长度: {max_length}")
+    print(f"- 词汇表大小: {VOCAB_SIZE}")
+    print(f"- Padding token ID: {PAD_TOKEN_ID}")
+    print(f"- EOS token ID: {EOS_TOKEN_ID}")
 
 class ProteinDataset(Dataset):
     """蛋白质序列数据集，从预计算的文件加载数据"""
@@ -395,14 +452,31 @@ class ProteinDataset(Dataset):
             data_path: 预计算数据的文件路径
             max_length: 序列的最大长度
         """
+        # 验证最大长度
+        if max_length <= 0:
+            raise ValueError(f"最大长度必须大于0，但收到了 {max_length}")
+        if max_length > MAX_SEQUENCE_LENGTH:
+            raise ValueError(f"最大长度不能超过配置的最大长度 {MAX_SEQUENCE_LENGTH}，但收到了 {max_length}")
+        
         # 加载数据
         data = torch.load(data_path)
         
         # 验证数据完整性
-        required_keys = ['embeddings', 'attention_masks', 'token_ids', 'sequences']
+        required_keys = ['embeddings', 'attention_masks', 'token_ids', 'sequences', 'config']
         for key in required_keys:
             if key not in data:
                 raise ValueError(f"数据文件缺少必需的键: {key}")
+        
+        # 验证配置一致性
+        config = data['config']
+        if config['max_length'] != max_length:
+            raise ValueError(f"数据文件中的最大长度 ({config['max_length']}) 与指定的最大长度 ({max_length}) 不匹配")
+        if config['vocab_size'] != VOCAB_SIZE:
+            raise ValueError(f"数据文件中的词汇表大小 ({config['vocab_size']}) 与配置的词汇表大小 ({VOCAB_SIZE}) 不匹配")
+        if config['pad_token_id'] != PAD_TOKEN_ID:
+            raise ValueError(f"数据文件中的PAD token ID ({config['pad_token_id']}) 与配置的PAD token ID ({PAD_TOKEN_ID}) 不匹配")
+        if config['eos_token_id'] != EOS_TOKEN_ID:
+            raise ValueError(f"数据文件中的EOS token ID ({config['eos_token_id']}) 与配置的EOS token ID ({EOS_TOKEN_ID}) 不匹配")
         
         # 确保数据在 CPU 上
         self.embeddings = data['embeddings'].cpu().float()
@@ -420,6 +494,14 @@ class ProteinDataset(Dataset):
             raise ValueError(f"Token IDs 的维度必须是 2 [N, seq_len], 但收到了 {self.token_ids.shape}")
         if len(self.embeddings) != len(self.sequences):
             raise ValueError(f"Embeddings ({len(self.embeddings)}) 和 sequences ({len(self.sequences)}) 数量不匹配")
+        
+        # 验证序列长度
+        if self.embeddings.shape[1] != max_length:
+            raise ValueError(f"Embeddings 序列长度 ({self.embeddings.shape[1]}) 与最大长度 ({max_length}) 不匹配")
+        if self.attention_masks.shape[1] != max_length:
+            raise ValueError(f"Attention masks 序列长度 ({self.attention_masks.shape[1]}) 与最大长度 ({max_length}) 不匹配")
+        if self.token_ids.shape[1] != max_length:
+            raise ValueError(f"Token IDs 序列长度 ({self.token_ids.shape[1]}) 与最大长度 ({max_length}) 不匹配")
         
         print(f"ProteinDataset 初始化: {len(self.embeddings)} 个样本")
         print(f"Embeddings 形状: {self.embeddings.shape}")

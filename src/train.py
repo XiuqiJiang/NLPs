@@ -8,6 +8,7 @@ from typing import Dict, Any, List, Optional
 import logging
 from datetime import datetime
 from pathlib import Path
+from tqdm import tqdm
 
 # 修复导入路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -36,7 +37,8 @@ from config.config import (
     EARLY_STOPPING_PATIENCE,
     EARLY_STOPPING_MIN_DELTA,
     MODEL_SAVE_DIR,
-    LOG_LEVEL
+    LOG_LEVEL,
+    BETA
 )
 from src.utils.data_utils import ProteinDataset
 from src.utils.trainer import VAETrainer
@@ -142,81 +144,78 @@ def train_epoch(
 def setup_logging():
     """设置日志"""
     os.makedirs(LOG_DIR, exist_ok=True)
-    
-    # 创建logger
-    logger = logging.getLogger('VAETrainer')
-    logger.setLevel(LOG_LEVEL)
-    
-    # 创建文件处理器
-    log_file = os.path.join(LOG_DIR, f'training_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(LOG_LEVEL)
-    
-    # 创建控制台处理器
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(LOG_LEVEL)
-    
-    # 创建格式化器
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-    
-    # 添加处理器到logger
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-    
-    return logger
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(os.path.join(LOG_DIR, 'training.log')),
+            logging.StreamHandler()
+        ]
+    )
+    return logging.getLogger(__name__)
 
 def main():
     """主训练函数"""
-    # 设置设备
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    # 设置日志
     logger = setup_logging()
-    logger.info(f"使用设备: {device}")
+    logger.info("开始训练...")
     
     # 创建数据加载器
     logger.info("创建数据加载器...")
     train_loader, val_loader = create_data_loaders(
-        data_path='data/processed/embeddings',
+        data_path='data/processed/protein_data.pt',
         batch_size=BATCH_SIZE,
-        val_split=0.1,  # 使用10%的数据作为验证集
-        shuffle=True
+        train_test_split=0.1  # 使用10%的数据作为验证集
     )
     
     # 初始化模型
     logger.info("初始化模型...")
     model = ESMVAEToken(
-        embedding_dim=1280,  # ESM-2 的嵌入维度
-        latent_dim=LATENT_DIM,
+        input_dim=ESM_EMBEDDING_DIM,
         hidden_dims=HIDDEN_DIMS,
+        latent_dim=LATENT_DIM,
         vocab_size=VOCAB_SIZE,
         max_sequence_length=MAX_SEQUENCE_LENGTH,
-        use_layer_norm=True
-    ).to(device)
+        pad_token_id=PAD_TOKEN_ID,
+        use_layer_norm=True,
+        dropout=0.1
+    )
     
     # 初始化优化器
-    optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    logger.info("初始化优化器...")
+    optimizer = optim.AdamW(
+        model.parameters(),
+        lr=LEARNING_RATE,
+        weight_decay=0.01  # 添加L2正则化
+    )
     
     # 初始化训练器
+    logger.info("初始化训练器...")
     trainer = VAETrainer(
         model=model,
         optimizer=optimizer,
-        device=device,
-        model_save_dir=MODEL_SAVE_DIR,
+        device=DEVICE,
         pad_token_id=PAD_TOKEN_ID,
-        kl_weight=KL_WEIGHT
+        beta=BETA,
+        max_grad_norm=1.0,
+        log_dir=LOG_DIR
     )
+    
+    # 创建模型保存目录
+    os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
     
     # 训练模型
     logger.info("开始训练...")
-    trainer.train(
+    history = trainer.train(
         train_loader=train_loader,
-        val_loader=val_loader,
         num_epochs=NUM_EPOCHS,
-        save_every=SAVE_EVERY
+        val_loader=val_loader,
+        save_dir=MODEL_SAVE_DIR,
+        save_freq=5
     )
     
     logger.info("训练完成！")
+    return history
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main() 

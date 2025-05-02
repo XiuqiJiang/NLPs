@@ -11,6 +11,7 @@ import argparse
 from pathlib import Path
 from tqdm import tqdm
 from collections import Counter
+import logging
 
 # 修复导入路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -25,8 +26,18 @@ from config.config import (
     VOCAB_SIZE,
     PAD_TOKEN_ID,
     EOS_TOKEN_ID,
-    ESM_EMBEDDING_DIM
+    ESM_EMBEDDING_DIM,
+    DEVICE,
+    MODEL_SAVE_DIR
 )
+
+def setup_logging():
+    """设置日志"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    return logging.getLogger(__name__)
 
 def create_id_to_char_mapping() -> Dict[int, str]:
     """创建ID到字符的映射
@@ -73,131 +84,135 @@ def sample_length(length_probs: Dict[int, float]) -> int:
 
 def generate_sequence(
     model: ESMVAEToken,
-    id_to_char: Dict[int, str],
     temperature: float = 1.0,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    max_length: Optional[int] = None
 ) -> str:
-    """生成单个蛋白质序列
+    """生成单个序列
     
     Args:
         model: VAE模型
-        id_to_char: ID到字符的映射
-        temperature: 采样温度，控制生成的多样性
-        device: 设备
+        temperature: 采样温度
+        max_length: 最大序列长度
         
     Returns:
         生成的序列
     """
     model.eval()
-    
     with torch.no_grad():
-        # 从标准正态分布采样隐变量
-        z = torch.randn(1, model.latent_dim).to(device)
+        # 从标准正态分布采样潜在向量
+        z = torch.randn(1, model.latent_dim).to(DEVICE)
         
-        # 解码生成logits
-        logits = model.decode(z)  # shape: (1, max_length, vocab_size)
+        # 解码得到logits
+        logits = model.decode(z)  # [1, max_sequence_length, vocab_size]
         
         # 应用温度缩放
-        if temperature != 1.0:
-            logits = logits / temperature
+        logits = logits / temperature
         
-        # 使用softmax获取概率分布
+        # 计算概率
         probs = F.softmax(logits, dim=-1)
         
-        # 从概率分布中采样token序列
-        sampled_ids = torch.multinomial(
+        # 采样token IDs
+        token_ids = torch.multinomial(
             probs.view(-1, probs.size(-1)),
             num_samples=1
         ).view(1, -1)
         
-        # 将token IDs转换为字符序列
+        # 转换为字符序列
+        id_to_char = create_id_to_char_mapping()
         sequence = []
-        for token_id in sampled_ids[0]:
-            if token_id.item() == EOS_TOKEN_ID:
+        
+        # 处理生成的token IDs
+        for token_id in token_ids[0]:
+            token_id = token_id.item()
+            
+            # 如果遇到EOS token，停止生成
+            if token_id == EOS_TOKEN_ID:
                 break
-            if token_id.item() != PAD_TOKEN_ID:
-                sequence.append(id_to_char[token_id.item()])
+                
+            # 跳过PAD token
+            if token_id == PAD_TOKEN_ID:
+                continue
+                
+            # 添加字符到序列
+            sequence.append(id_to_char[token_id])
+            
+            # 如果达到最大长度，停止生成
+            if max_length and len(sequence) >= max_length:
+                break
         
         return ''.join(sequence)
 
 def generate_sequences(
-    model: ESMVAEToken,
-    num_sequences: int,
+    model_path: str,
+    num_sequences: int = 10,
     temperature: float = 1.0,
-    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    max_length: Optional[int] = None
 ) -> List[str]:
-    """生成多个蛋白质序列
+    """生成多个序列
     
     Args:
-        model: VAE模型
+        model_path: 模型路径
         num_sequences: 要生成的序列数量
         temperature: 采样温度
-        device: 设备
+        max_length: 最大序列长度
         
     Returns:
         生成的序列列表
     """
-    id_to_char = create_id_to_char_mapping()
-    sequences = []
+    logger = setup_logging()
+    logger.info(f"从 {model_path} 加载模型...")
     
-    for _ in tqdm(range(num_sequences), desc="生成序列"):
-        sequence = generate_sequence(model, id_to_char, temperature, device)
-        if sequence:  # 只添加非空序列
-            sequences.append(sequence)
+    # 加载模型检查点
+    checkpoint = torch.load(model_path, map_location=DEVICE)
+    
+    # 初始化模型
+    model = ESMVAEToken(
+        input_dim=ESM_EMBEDDING_DIM,
+        hidden_dims=HIDDEN_DIMS,
+        latent_dim=LATENT_DIM,
+        vocab_size=VOCAB_SIZE,
+        max_sequence_length=MAX_SEQUENCE_LENGTH,
+        pad_token_id=PAD_TOKEN_ID,
+        use_layer_norm=True,
+        dropout=0.1
+    )
+    
+    # 加载模型权重
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model.to(DEVICE)
+    model.eval()
+    
+    # 生成序列
+    logger.info(f"生成 {num_sequences} 个序列...")
+    sequences = []
+    for i in range(num_sequences):
+        sequence = generate_sequence(
+            model=model,
+            temperature=temperature,
+            max_length=max_length
+        )
+        sequences.append(sequence)
+        logger.info(f"序列 {i+1}: {sequence}")
     
     return sequences
 
 def main():
-    parser = argparse.ArgumentParser(description="使用VAE生成蛋白质序列")
-    parser.add_argument("--model_path", type=str, required=True, help="模型权重路径")
-    parser.add_argument("--num_sequences", type=int, default=10, help="要生成的序列数量")
-    parser.add_argument("--temperature", type=float, default=1.0, help="采样温度，控制生成的多样性")
-    parser.add_argument("--output_file", type=str, default="generated_sequences.txt", help="输出文件路径")
-    args = parser.parse_args()
-    
-    # 设置设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
-    
-    # 加载模型
-    model = ESMVAEToken(
-        embedding_dim=ESM_EMBEDDING_DIM,
-        latent_dim=LATENT_DIM,
-        hidden_dims=HIDDEN_DIMS,
-        vocab_size=VOCAB_SIZE,
-        max_sequence_length=MAX_SEQUENCE_LENGTH,
-        use_layer_norm=True
-    ).to(device)
-    
-    # 加载模型权重
-    checkpoint = torch.load(args.model_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    print(f"从 {args.model_path} 加载模型")
-    
+    """主函数"""
     # 生成序列
     sequences = generate_sequences(
-        model,
-        args.num_sequences,
-        args.temperature,
-        device
+        model_path=os.path.join(MODEL_SAVE_DIR, 'best_model.pt'),
+        num_sequences=10,
+        temperature=0.8,
+        max_length=MAX_SEQUENCE_LENGTH
     )
     
-    # 保存序列
-    output_path = Path(args.output_file)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(output_path, "w") as f:
+    # 保存生成的序列
+    output_file = os.path.join(MODEL_SAVE_DIR, 'generated_sequences.txt')
+    with open(output_file, 'w') as f:
         for i, seq in enumerate(sequences, 1):
-            f.write(f">Generated_sequence_{i}\n")
-            f.write(f"{seq}\n")
+            f.write(f"序列 {i}:\n{seq}\n\n")
     
-    print(f"生成 {len(sequences)} 个序列并保存到 {output_path}")
-    
-    # 打印生成的序列长度分布
-    generated_lengths = [len(seq) for seq in sequences]
-    print("\n生成序列的长度分布:")
-    for length, count in Counter(generated_lengths).items():
-        print(f"长度 {length}: {count} 个序列")
+    print(f"生成的序列已保存到 {output_file}")
 
 if __name__ == "__main__":
     main() 
