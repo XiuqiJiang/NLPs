@@ -38,7 +38,8 @@ EARLY_STOPPING_MIN_DELTA = 0.01  # 早停最小变化值
 KL_WEIGHT = 0.1   # KL散度权重
 MODEL_SAVE_DIR = 'results/models/vae/weights'  # 模型保存目录
 
-from src.models.vae import ESMVAE, vae_loss
+# 修改导入语句
+from src.models.vae_token import ESMVAEToken
 from src.utils.data_utils import load_sequences, create_data_loaders
 
 class EarlyStopping:
@@ -219,8 +220,15 @@ class VAETrainer:
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
         
         for batch in pbar:
+            # 将数据移动到正确的设备上
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            
             # 计算损失
-            loss, loss_dict = self._compute_loss(batch['embeddings'], batch['attention_mask'], batch['token_ids'])
+            loss, loss_dict = self._compute_loss(
+                batch['embeddings'],
+                batch['attention_mask'],
+                batch['token_ids']
+            )
             
             # 反向传播
             self.optimizer.zero_grad()
@@ -351,8 +359,15 @@ class VAETrainer:
         
         with torch.no_grad():
             for batch in val_loader:
+                # 将数据移动到正确的设备上
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                
                 # 计算损失
-                loss, loss_dict = self._compute_loss(batch['embeddings'], batch['attention_mask'], batch['token_ids'])
+                loss, loss_dict = self._compute_loss(
+                    batch['embeddings'],
+                    batch['attention_mask'],
+                    batch['token_ids']
+                )
                 
                 # 更新统计信息
                 total_loss += loss.item()

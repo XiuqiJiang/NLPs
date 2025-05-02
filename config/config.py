@@ -31,7 +31,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # 模型配置
 ESM_MODEL_PATH = os.path.join(ROOT_DIR, "esm_model")
 ESM_MODEL_NAME = "esm2-fine-tune"
-ESM_EMBEDDING_DIM = 320
+ESM_EMBEDDING_DIM = 640
 ESM_FINETUNE_EPOCHS = 6
 
 # 序列配置

@@ -20,7 +20,7 @@ from src.utils.data_utils import (
     load_sequences,
     preprocess_and_embed
 )
-from src.utils.logger import setup_logging
+from src.utils.logger import setup_logger
 from src.utils.trainer import VAETrainer
 from config.config import (
     RANDOM_SEED,
