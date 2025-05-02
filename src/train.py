@@ -170,10 +170,16 @@ def main():
     if not os.path.exists(EMBEDDING_FILE):
         logger.info(f"数据文件 {EMBEDDING_FILE} 不存在，开始预处理数据...")
         # 加载原始序列
+        logger.info(f"从文件 {SEQUENCE_FILE} 加载序列...")
         sequences = load_sequences(SEQUENCE_FILE)
         logger.info(f"从文件 {SEQUENCE_FILE} 中成功加载 {len(sequences)} 个序列")
         
+        if len(sequences) < 10:
+            logger.warning(f"加载的序列数量过少 ({len(sequences)})，请检查数据文件")
+            return
+        
         # 预处理数据
+        logger.info("开始预处理数据...")
         preprocess_and_embed(
             sequences=sequences,
             output_path=EMBEDDING_FILE,
@@ -182,6 +188,8 @@ def main():
             max_length=MAX_SEQUENCE_LENGTH
         )
         logger.info(f"数据预处理完成，保存到 {EMBEDDING_FILE}")
+    else:
+        logger.info(f"使用现有的数据文件: {EMBEDDING_FILE}")
     
     # 创建数据加载器
     logger.info("创建数据加载器...")

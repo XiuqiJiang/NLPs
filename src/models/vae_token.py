@@ -7,7 +7,6 @@ from config.config import (
     ESM_MODEL_NAME,
     LATENT_DIM,
     HIDDEN_DIMS,
-    ALPHABET,
     ESM_EMBEDDING_DIM
 )
 
@@ -54,8 +53,8 @@ class ESMVAEToken(nn.Module):
         self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
         self.fc_logvar = nn.Linear(hidden_dims[-1], latent_dim)
         
-        # 解码器输出层
-        self.fc_out = nn.Linear(hidden_dims[-1], max_sequence_length * vocab_size)
+        # 解码器输出层 - 使用hidden_dims[0]作为输入维度
+        self.fc_out = nn.Linear(hidden_dims[0], vocab_size)
         
         # 初始化权重
         self.apply(self._init_weights)
@@ -172,11 +171,13 @@ class ESMVAEToken(nn.Module):
             raise ValueError(f"潜在维度必须是 {self.latent_dim}，但收到了 {z.size(-1)}")
         
         # 通过解码器网络
-        x = self.decoder(z)
+        x = self.decoder(z)  # [batch_size, hidden_dims[-1]]
         
-        # 通过输出层并重塑
-        logits = self.fc_out(x)
-        logits = logits.view(-1, self.max_sequence_length, self.vocab_size)
+        # 扩展序列维度
+        x = x.unsqueeze(1).expand(-1, self.max_sequence_length, -1)  # [batch_size, max_sequence_length, hidden_dims[-1]]
+        
+        # 通过输出层
+        logits = self.fc_out(x)  # [batch_size, max_sequence_length, vocab_size]
         
         # 验证输出形状
         if logits.size(-1) != self.vocab_size:

@@ -115,19 +115,33 @@ def load_sequences(file_path: str) -> List[str]:
     """从文本文件加载蛋白质序列 (每行一个，忽略 '>' 开头的行)"""
     sequences = []
     try:
+        print(f"开始从文件 {file_path} 加载序列...")
         with open(file_path, 'r') as f:
-            for line in f:
+            lines = f.readlines()
+            print(f"文件总行数: {len(lines)}")
+            
+            for i, line in enumerate(lines):
                 line = line.strip()
                 if line and not line.startswith('>'):
-                    sequences.append(line.upper()) # 转换为大写
+                    sequences.append(line.upper())  # 转换为大写
+                    if i < 5:  # 打印前5个序列作为示例
+                        print(f"序列 {i+1}: {line}")
+                
+                if i % 50 == 0:  # 每50行打印一次进度
+                    print(f"已处理 {i} 行...")
+                    
     except Exception as e:
         print(f"读取文件 {file_path} 时出错: {str(e)}")
         raise
 
     if not sequences:
         print(f"警告: 文件 {file_path} 中没有找到任何有效序列")
+    else:
+        print(f"从文件 {file_path} 中成功加载 {len(sequences)} 个序列")
+        print(f"前5个序列示例:")
+        for i, seq in enumerate(sequences[:5]):
+            print(f"序列 {i+1}: {seq}")
 
-    print(f"从文件 {file_path} 中成功加载 {len(sequences)} 个序列")
     return sequences
 
 # --- DataLoader 创建函数 ---

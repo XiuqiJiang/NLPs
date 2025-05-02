@@ -10,26 +10,23 @@ from typing import Dict, Any, List, Optional
 import argparse
 from pathlib import Path
 from tqdm import tqdm
-from collections import Counter
 import logging
 
 # 修复导入路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.models.vae_token import ESMVAEToken
 from config.config import (
-    ESM_MODEL_NAME,
     LATENT_DIM,
     HIDDEN_DIMS,
-    ALPHABET,
-    DATA_PATH,
     MAX_SEQUENCE_LENGTH,
-    VOCAB_SIZE,
-    PAD_TOKEN_ID,
-    EOS_TOKEN_ID,
     ESM_EMBEDDING_DIM,
     DEVICE,
-    MODEL_SAVE_DIR
+    MODEL_SAVE_DIR,
+    SEQUENCE_FILE
 )
+
+# 使用本地ESM模型路径
+ESM_MODEL_NAME = "/content/NLPs/esm_model"  # 使用绝对路径
 
 def setup_logging():
     """设置日志"""
@@ -39,60 +36,21 @@ def setup_logging():
     )
     return logging.getLogger(__name__)
 
-def create_id_to_char_mapping() -> Dict[int, str]:
-    """创建ID到字符的映射
-    
-    Returns:
-        ID到字符的映射字典
-    """
-    return {i: char for i, char in enumerate(ALPHABET)}
-
-def get_length_distribution(data_path: str) -> Dict[int, float]:
-    """获取训练数据的长度分布
-    
-    Args:
-        data_path: 训练数据文件路径
-        
-    Returns:
-        长度分布字典，键为长度，值为概率
-    """
-    lengths = []
-    with open(data_path, 'r') as f:
-        for line in f:
-            if line.strip():
-                lengths.append(len(line.strip()))
-    
-    # 计算长度分布
-    length_counts = Counter(lengths)
-    total = sum(length_counts.values())
-    length_probs = {length: count/total for length, count in length_counts.items()}
-    
-    return length_probs
-
-def sample_length(length_probs: Dict[int, float]) -> int:
-    """从长度分布中采样一个长度
-    
-    Args:
-        length_probs: 长度分布字典
-        
-    Returns:
-        采样的长度
-    """
-    lengths = list(length_probs.keys())
-    probs = list(length_probs.values())
-    return np.random.choice(lengths, p=probs)
-
 def generate_sequence(
     model: ESMVAEToken,
+    tokenizer: AutoTokenizer,
     temperature: float = 1.0,
-    max_length: Optional[int] = None
+    max_length: Optional[int] = None,
+    top_k: int = 50  # 添加top-k采样
 ) -> str:
     """生成单个序列
     
     Args:
         model: VAE模型
-        temperature: 采样温度
+        tokenizer: ESM tokenizer
+        temperature: 采样温度，较低的值使生成更保守
         max_length: 最大序列长度
+        top_k: 只考虑概率最高的k个token
         
     Returns:
         生成的序列
@@ -108,6 +66,14 @@ def generate_sequence(
         # 应用温度缩放
         logits = logits / temperature
         
+        # 应用top-k采样
+        if top_k > 0:
+            # 确保k不超过词汇表大小
+            k = min(top_k, logits.size(-1))
+            if k > 0:
+                indices_to_remove = logits < torch.topk(logits, k)[0][..., -1, None]
+                logits[indices_to_remove] = float('-inf')
+        
         # 计算概率
         probs = F.softmax(logits, dim=-1)
         
@@ -118,35 +84,20 @@ def generate_sequence(
         ).view(1, -1)
         
         # 转换为字符序列
-        id_to_char = create_id_to_char_mapping()
-        sequence = []
+        sequence = tokenizer.decode(token_ids[0], skip_special_tokens=True)
         
-        # 处理生成的token IDs
-        for token_id in token_ids[0]:
-            token_id = token_id.item()
-            
-            # 如果遇到EOS token，停止生成
-            if token_id == EOS_TOKEN_ID:
-                break
-                
-            # 跳过PAD token
-            if token_id == PAD_TOKEN_ID:
-                continue
-                
-            # 添加字符到序列
-            sequence.append(id_to_char[token_id])
-            
-            # 如果达到最大长度，停止生成
-            if max_length and len(sequence) >= max_length:
-                break
+        # 如果达到最大长度，截断序列
+        if max_length and len(sequence) > max_length:
+            sequence = sequence[:max_length]
         
-        return ''.join(sequence)
+        return sequence
 
 def generate_sequences(
     model_path: str,
     num_sequences: int = 10,
-    temperature: float = 1.0,
-    max_length: Optional[int] = None
+    temperature: float = 0.7,  # 降低默认温度使生成更保守
+    max_length: Optional[int] = None,
+    top_k: int = 50
 ) -> List[str]:
     """生成多个序列
     
@@ -155,6 +106,7 @@ def generate_sequences(
         num_sequences: 要生成的序列数量
         temperature: 采样温度
         max_length: 最大序列长度
+        top_k: top-k采样参数
         
     Returns:
         生成的序列列表
@@ -165,14 +117,24 @@ def generate_sequences(
     # 加载模型检查点
     checkpoint = torch.load(model_path, map_location=DEVICE)
     
+    # 加载ESM tokenizer以获取词汇表大小
+    logger.info(f"从 {ESM_MODEL_NAME} 加载tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME)
+    vocab_size = tokenizer.vocab_size
+    pad_token_id = tokenizer.pad_token_id
+    
+    # 确保top_k不超过词汇表大小
+    top_k = min(top_k, vocab_size)
+    logger.info(f"使用top_k={top_k}（词汇表大小={vocab_size}）")
+    
     # 初始化模型
     model = ESMVAEToken(
         input_dim=ESM_EMBEDDING_DIM,
         hidden_dims=HIDDEN_DIMS,
         latent_dim=LATENT_DIM,
-        vocab_size=VOCAB_SIZE,
+        vocab_size=vocab_size,
         max_sequence_length=MAX_SEQUENCE_LENGTH,
-        pad_token_id=PAD_TOKEN_ID,
+        pad_token_id=pad_token_id,
         use_layer_norm=True,
         dropout=0.1
     )
@@ -188,8 +150,10 @@ def generate_sequences(
     for i in range(num_sequences):
         sequence = generate_sequence(
             model=model,
+            tokenizer=tokenizer,
             temperature=temperature,
-            max_length=max_length
+            max_length=max_length,
+            top_k=top_k
         )
         sequences.append(sequence)
         logger.info(f"序列 {i+1}: {sequence}")
@@ -202,8 +166,9 @@ def main():
     sequences = generate_sequences(
         model_path=os.path.join(MODEL_SAVE_DIR, 'best_model.pt'),
         num_sequences=10,
-        temperature=0.8,
-        max_length=MAX_SEQUENCE_LENGTH
+        temperature=0.7,  # 使用更保守的温度
+        max_length=MAX_SEQUENCE_LENGTH,
+        top_k=50  # 只考虑概率最高的50个token
     )
     
     # 保存生成的序列
