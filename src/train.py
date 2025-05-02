@@ -6,25 +6,31 @@ from tqdm import tqdm
 import os
 from datetime import datetime
 from typing import Tuple
+import sys
+import logging
 
-from models.vae_token import ESMVAEToken, vae_token_loss
-from data.dataset import ProteinDataset
+# 修复导入路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.models.vae_token import ESMVAEToken, vae_token_loss
+from src.data.dataset import create_data_loaders
+from src.utils.logger import setup_logger
 from config.config import (
     BATCH_SIZE,
     NUM_EPOCHS,
     LEARNING_RATE,
     KL_WEIGHT,
     SAVE_DIR,
-    ESM_MODEL_NAME
+    LOG_DIR,
+    LOG_LEVEL
 )
-from utils.logger import setup_logger
 
 def train_epoch(
     model: nn.Module,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
-    kl_weight: float
+    kl_weight: float,
+    logger: logging.Logger
 ) -> Tuple[float, float, float]:
     """训练一个epoch
     
@@ -34,6 +40,7 @@ def train_epoch(
         optimizer: 优化器
         device: 设备
         kl_weight: KL散度权重
+        logger: 日志记录器
         
     Returns:
         平均总损失、重建损失和KL散度
@@ -76,6 +83,14 @@ def train_epoch(
     avg_recon_loss = total_recon_loss / num_batches
     avg_kl_loss = total_kl_loss / num_batches
     
+    # 记录训练信息
+    logger.info(
+        f"Training - "
+        f"Loss: {avg_loss:.4f} - "
+        f"Recon Loss: {avg_recon_loss:.4f} - "
+        f"KL Loss: {avg_kl_loss:.4f}"
+    )
+    
     return avg_loss, avg_recon_loss, avg_kl_loss
 
 def main():
@@ -89,46 +104,41 @@ def main():
     os.makedirs(save_dir, exist_ok=True)
     
     # 设置日志
-    logger = setup_logger(save_dir)
+    logger = setup_logger(LOG_DIR, level=LOG_LEVEL)
+    logger.info(f"Starting training with device: {device}")
     
     # 加载数据集
-    train_dataset = ProteinDataset(split="train")
-    train_dataloader = DataLoader(
-        train_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=True,
-        num_workers=4
-    )
+    train_loader, val_loader = create_data_loaders()
+    logger.info(f"Loaded {len(train_loader.dataset)} training sequences")
+    logger.info(f"Loaded {len(val_loader.dataset)} validation sequences")
     
     # 初始化模型
     model = ESMVAEToken().to(device)
+    logger.info("Initialized VAE model")
     
     # 初始化优化器
     optimizer = Adam(model.parameters(), lr=LEARNING_RATE)
+    logger.info(f"Initialized optimizer with learning rate: {LEARNING_RATE}")
     
     # 训练循环
     best_loss = float('inf')
     for epoch in range(NUM_EPOCHS):
+        logger.info(f"Starting epoch {epoch+1}/{NUM_EPOCHS}")
+        
         # 训练一个epoch
         avg_loss, avg_recon_loss, avg_kl_loss = train_epoch(
             model,
-            train_dataloader,
+            train_loader,
             optimizer,
             device,
-            KL_WEIGHT
-        )
-        
-        # 记录日志
-        logger.info(
-            f"Epoch {epoch+1}/{NUM_EPOCHS} - "
-            f"Loss: {avg_loss:.4f} - "
-            f"Recon Loss: {avg_recon_loss:.4f} - "
-            f"KL Loss: {avg_kl_loss:.4f}"
+            KL_WEIGHT,
+            logger
         )
         
         # 保存最佳模型
         if avg_loss < best_loss:
             best_loss = avg_loss
+            model_path = os.path.join(save_dir, 'best_model.pth')
             torch.save(
                 {
                     'epoch': epoch,
@@ -136,10 +146,12 @@ def main():
                     'optimizer_state_dict': optimizer.state_dict(),
                     'loss': avg_loss,
                 },
-                os.path.join(save_dir, 'best_model.pth')
+                model_path
             )
+            logger.info(f"Saved best model to {model_path}")
         
         # 每个epoch保存一次检查点
+        checkpoint_path = os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth')
         torch.save(
             {
                 'epoch': epoch,
@@ -147,8 +159,11 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'loss': avg_loss,
             },
-            os.path.join(save_dir, f'checkpoint_epoch_{epoch+1}.pth')
+            checkpoint_path
         )
+        logger.info(f"Saved checkpoint to {checkpoint_path}")
+    
+    logger.info("Training completed")
 
 if __name__ == "__main__":
     main() 

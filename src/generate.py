@@ -9,51 +9,59 @@ from typing import Dict, Any, List, Optional
 import argparse
 from pathlib import Path
 from tqdm import tqdm
+from collections import Counter
 
-# 添加项目根目录到Python路径
-root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(root_dir)
-
-try:
-    from config.config import *
-    print("成功导入配置文件")
-    print(f"从配置文件导入的LATENT_DIM: {LATENT_DIM}")
-except ImportError:
-    print("Warning: Could not import from config file. Using default values.")
-    # 默认配置值
-    LATENT_DIM = 64
-    MAX_SEQUENCE_LENGTH = 64
-    NUM_SAMPLES = 10
-    MODEL_WEIGHTS_PATH = '/content/NLPs/results/models/vae/weights/checkpoint_epoch_95.pth'
-    GENERATED_SEQUENCES_PATH = 'results/generated/sequences.txt'
-    ESM_MODEL_NAME = "facebook/esm2_t30_150M_UR50D"
-    RANDOM_SEED = 42
-
+# 修复导入路径
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.models.vae_token import ESMVAEToken
-from src.utils.data_utils import load_sequences, create_data_loaders
+from config.config import (
+    ESM_MODEL_NAME,
+    LATENT_DIM,
+    HIDDEN_DIM,
+    ALPHABET,
+    DATA_PATH,
+    MAX_SEQUENCE_LENGTH
+)
 
-def print_system_info():
-    """打印系统信息"""
-    print("系统信息:")
-    print(f"Python版本: {sys.version}")
-    print(f"PyTorch版本: {torch.__version__}")
-    print(f"CUDA是否可用: {torch.cuda.is_available()}")
-    if torch.cuda.is_available():
-        print(f"CUDA版本: {torch.version.cuda}")
-        print(f"当前GPU: {torch.cuda.get_device_name(0)}")
+def get_length_distribution(data_path: str) -> Dict[int, float]:
+    """获取训练数据的长度分布
     
-    print("\n当前配置:")
-    print(f"NUM_SAMPLES: {NUM_SAMPLES}")
-    print(f"LATENT_DIM: {LATENT_DIM}")
-    print(f"MAX_SEQUENCE_LENGTH: {MAX_SEQUENCE_LENGTH}")
-    print(f"MODEL_WEIGHTS_PATH: {MODEL_WEIGHTS_PATH}")
-    print(f"GENERATED_SEQUENCES_PATH: {GENERATED_SEQUENCES_PATH}")
-    print(f"ESM_MODEL_NAME: {ESM_MODEL_NAME}")
+    Args:
+        data_path: 训练数据文件路径
+        
+    Returns:
+        长度分布字典，键为长度，值为概率
+    """
+    lengths = []
+    with open(data_path, 'r') as f:
+        for line in f:
+            if line.strip():
+                lengths.append(len(line.strip()))
+    
+    # 计算长度分布
+    length_counts = Counter(lengths)
+    total = sum(length_counts.values())
+    length_probs = {length: count/total for length, count in length_counts.items()}
+    
+    return length_probs
+
+def sample_length(length_probs: Dict[int, float]) -> int:
+    """从长度分布中采样一个长度
+    
+    Args:
+        length_probs: 长度分布字典
+        
+    Returns:
+        采样的长度
+    """
+    lengths = list(length_probs.keys())
+    probs = list(length_probs.values())
+    return np.random.choice(lengths, p=probs)
 
 def generate_sequences(
     model: ESMVAEToken,
     num_sequences: int,
-    max_length: int = 100,
+    length_probs: Dict[int, float],
     temperature: float = 1.0,
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 ) -> List[str]:
@@ -62,8 +70,11 @@ def generate_sequences(
     Args:
         model: VAE模型
         num_sequences: 要生成的序列数量
-        max_length: 最大序列长度
-        temperature: 采样温度
+        length_probs: 长度分布字典
+        temperature: 采样温度，控制生成的多样性
+            - temperature > 1.0: 增加多样性
+            - temperature < 1.0: 减少多样性
+            - temperature = 1.0: 标准采样
         device: 设备
         
     Returns:
@@ -74,26 +85,32 @@ def generate_sequences(
     
     with torch.no_grad():
         for _ in tqdm(range(num_sequences), desc="Generating sequences"):
+            # 从长度分布中采样目标长度
+            target_length = sample_length(length_probs)
+            
             # 从标准正态分布采样隐变量
             z = torch.randn(1, model.latent_dim).to(device)
             
-            # 解码生成logits
-            logits = model.decode(z)  # shape: (1, vocab_size)
+            # 解码生成整个序列的logits
+            # shape: (1, max_length, vocab_size)
+            logits = model.decode(z)
             
             # 应用温度缩放
-            logits = logits / temperature
+            if temperature != 1.0:
+                logits = logits / temperature
             
             # 使用softmax获取概率分布
             probs = torch.softmax(logits, dim=-1)
             
-            # 从概率分布中采样token
-            token_id = torch.multinomial(probs, num_samples=1).item()
+            # 从概率分布中采样token序列
+            # shape: (1, max_length)
+            token_ids = torch.multinomial(probs.view(-1, probs.size(-1)), num_samples=1).view(1, -1)
             
-            # 解码token为氨基酸序列
-            sequence = model.tokenizer.decode([token_id])
+            # 截取到目标长度
+            token_ids = token_ids[:, :target_length]
             
-            # 移除特殊token
-            sequence = sequence.replace("<pad>", "").replace("<cls>", "").replace("<eos>", "").strip()
+            # 解码序列，跳过特殊token
+            sequence = model.tokenizer.decode(token_ids[0].tolist(), skip_special_tokens=True)
             
             if sequence:  # 只添加非空序列
                 sequences.append(sequence)
@@ -104,14 +121,18 @@ def main():
     parser = argparse.ArgumentParser(description="使用VAE生成蛋白质序列")
     parser.add_argument("--model_path", type=str, required=True, help="模型权重路径")
     parser.add_argument("--num_sequences", type=int, default=10, help="要生成的序列数量")
-    parser.add_argument("--max_length", type=int, default=100, help="最大序列长度")
-    parser.add_argument("--temperature", type=float, default=1.0, help="采样温度")
+    parser.add_argument("--temperature", type=float, default=1.0, help="采样温度，控制生成的多样性")
     parser.add_argument("--output_file", type=str, default="generated_sequences.txt", help="输出文件路径")
     args = parser.parse_args()
     
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+    
+    # 获取训练数据的长度分布
+    length_probs = get_length_distribution(DATA_PATH)
+    print(f"Loaded length distribution from training data")
+    print(f"Length range: {min(length_probs.keys())} - {max(length_probs.keys())}")
     
     # 加载模型
     model = ESMVAEToken().to(device)
@@ -123,7 +144,7 @@ def main():
     sequences = generate_sequences(
         model,
         args.num_sequences,
-        args.max_length,
+        length_probs,
         args.temperature,
         device
     )
@@ -138,6 +159,12 @@ def main():
             f.write(f"{seq}\n")
     
     print(f"Generated {len(sequences)} sequences and saved to {output_path}")
+    
+    # 打印生成的序列长度分布
+    generated_lengths = [len(seq) for seq in sequences]
+    print("\nGenerated sequences length distribution:")
+    for length, count in Counter(generated_lengths).items():
+        print(f"Length {length}: {count} sequences")
 
 if __name__ == "__main__":
     main() 

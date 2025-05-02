@@ -4,7 +4,18 @@ from transformers import AutoTokenizer, AutoModel
 from typing import List, Dict, Any, Optional
 import numpy as np
 from pathlib import Path
-from config.config import *
+import os
+
+# 修复导入路径
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from config.config import (
+    ESM_MODEL_NAME,
+    VAE_BATCH_SIZE,
+    TRAIN_TEST_SPLIT,
+    NUM_WORKERS,
+    PIN_MEMORY
+)
 
 class ProteinDataset(Dataset):
     """蛋白质序列数据集"""
@@ -13,7 +24,8 @@ class ProteinDataset(Dataset):
         self,
         sequences: Optional[List[str]] = None,
         split: str = "train",
-        max_length: int = 1000
+        max_length: int = 1000,
+        data_path: str = "/data1/xjiang/02.Projects/VAE/data/raw/NLP_sequences_no cesin.txt"
     ):
         """初始化数据集
         
@@ -21,6 +33,7 @@ class ProteinDataset(Dataset):
             sequences: 序列列表，如果为None则从文件加载
             split: 数据集划分（"train"或"val"）
             max_length: 最大序列长度
+            data_path: 数据文件路径
         """
         self.max_length = max_length
         self.tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME)
@@ -28,14 +41,15 @@ class ProteinDataset(Dataset):
         
         if sequences is None:
             # 从文件加载序列
-            data_dir = Path("data/raw")
-            if split == "train":
-                file_path = data_dir / "train_sequences.txt"
-            else:
-                file_path = data_dir / "val_sequences.txt"
-            
-            with open(file_path, "r") as f:
+            with open(data_path, "r") as f:
                 sequences = [line.strip() for line in f if line.strip()]
+            
+            # 划分训练集和验证集
+            train_size = int(len(sequences) * (1 - TRAIN_TEST_SPLIT))
+            if split == "train":
+                sequences = sequences[:train_size]
+            else:
+                sequences = sequences[train_size:]
         
         self.sequences = sequences
     
@@ -86,32 +100,31 @@ class ProteinDataset(Dataset):
         }
 
 def create_data_loaders(
-    embeddings: torch.Tensor,
     batch_size: int = VAE_BATCH_SIZE,
     train_split: float = TRAIN_TEST_SPLIT,
-    num_workers: int = 4,
-    pin_memory: bool = True
+    num_workers: int = NUM_WORKERS,
+    pin_memory: bool = PIN_MEMORY
 ) -> tuple[DataLoader, DataLoader]:
     """创建训练和验证数据加载器"""
-    dataset = ProteinDataset(embeddings)
-    train_size = int((1 - train_split) * len(dataset))
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, len(dataset) - train_size]
-    )
+    train_dataset = ProteinDataset(split="train")
+    val_dataset = ProteinDataset(split="val")
     
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        collate_fn=ProteinDataset.collate_fn
     )
+    
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=pin_memory
+        pin_memory=pin_memory,
+        collate_fn=ProteinDataset.collate_fn
     )
     
     return train_loader, val_loader 

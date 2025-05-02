@@ -1,4 +1,5 @@
 import torch
+import os
 
 # 基础配置
 RANDOM_SEED = 42
@@ -22,9 +23,9 @@ ESM_LEARNING_RATE = 1e-5
 # VAE模型配置
 LATENT_DIM = 64
 HIDDEN_DIM = 256
-VAE_BATCH_SIZE = 32
-VAE_LEARNING_RATE = 0.001
-VAE_EPOCHS = 100
+BATCH_SIZE = 32
+LEARNING_RATE = 0.001
+NUM_EPOCHS = 100
 KL_WEIGHT = 0.1
 
 # 训练配置
@@ -34,9 +35,8 @@ GRADIENT_CLIPPING = 1.0
 METRICS = ['loss', 'recon_loss', 'kl_loss']
 
 # 模型保存配置
-MODEL_SAVE_DIR = 'results/models/vae/weights'
+SAVE_DIR = 'results/models/vae/weights'
 MODEL_SAVE_FREQUENCY = 5
-MODEL_WEIGHTS_PATH = '/content/NLPs/results/models/vae/weights/checkpoint_epoch_95.pth'
 
 # 生成配置
 NUM_SAMPLES = 10
@@ -45,4 +45,9 @@ GENERATED_SEQUENCES_PATH = 'results/generated/sequences.txt'
 # 日志配置
 LOG_DIR = 'results/logs'
 LOG_LEVEL = 'INFO'
-PROGRESS_BAR = True 
+PROGRESS_BAR = True
+
+# 创建必要的目录
+os.makedirs(SAVE_DIR, exist_ok=True)
+os.makedirs(LOG_DIR, exist_ok=True)
+os.makedirs(os.path.dirname(GENERATED_SEQUENCES_PATH), exist_ok=True) 
