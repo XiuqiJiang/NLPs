@@ -11,10 +11,12 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from config.config import (
     ESM_MODEL_NAME,
-    VAE_BATCH_SIZE,
+    BATCH_SIZE,
     TRAIN_TEST_SPLIT,
     NUM_WORKERS,
-    PIN_MEMORY
+    PIN_MEMORY,
+    MAX_SEQUENCE_LENGTH,
+    DATA_PATH
 )
 
 class ProteinDataset(Dataset):
@@ -24,18 +26,15 @@ class ProteinDataset(Dataset):
         self,
         sequences: Optional[List[str]] = None,
         split: str = "train",
-        max_length: int = 1000,
-        data_path: str = "/data1/xjiang/02.Projects/VAE/data/raw/NLP_sequences_no cesin.txt"
+        data_path: str = DATA_PATH
     ):
         """初始化数据集
         
         Args:
             sequences: 序列列表，如果为None则从文件加载
             split: 数据集划分（"train"或"val"）
-            max_length: 最大序列长度
             data_path: 数据文件路径
         """
-        self.max_length = max_length
         self.tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME)
         self.model = AutoModel.from_pretrained(ESM_MODEL_NAME)
         
@@ -62,7 +61,7 @@ class ProteinDataset(Dataset):
         # 编码序列
         encoded = self.tokenizer(
             sequence,
-            max_length=self.max_length,
+            max_length=MAX_SEQUENCE_LENGTH,
             padding="max_length",
             truncation=True,
             return_tensors="pt"
@@ -100,14 +99,14 @@ class ProteinDataset(Dataset):
         }
 
 def create_data_loaders(
-    batch_size: int = VAE_BATCH_SIZE,
+    batch_size: int = BATCH_SIZE,
     train_split: float = TRAIN_TEST_SPLIT,
     num_workers: int = NUM_WORKERS,
     pin_memory: bool = PIN_MEMORY
 ) -> tuple[DataLoader, DataLoader]:
     """创建训练和验证数据加载器"""
-    train_dataset = ProteinDataset(split="train")
-    val_dataset = ProteinDataset(split="val")
+    train_dataset = ProteinDataset(split="train", data_path=DATA_PATH)
+    val_dataset = ProteinDataset(split="val", data_path=DATA_PATH)
     
     train_loader = DataLoader(
         train_dataset,
