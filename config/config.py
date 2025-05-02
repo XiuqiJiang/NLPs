@@ -1,3 +1,5 @@
+import torch
+
 # 基础配置
 RANDOM_SEED = 42
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
