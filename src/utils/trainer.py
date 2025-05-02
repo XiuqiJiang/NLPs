@@ -3,13 +3,14 @@ import numpy as np
 from tqdm import tqdm
 import os
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from transformers import AutoTokenizer
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 import logging
 from pathlib import Path
 import torch.nn as nn
+import torch.nn.functional as F
 
 # 导入配置文件
 import sys
@@ -17,7 +18,7 @@ from pathlib import Path
 
 # 获取项目根目录
 root_dir = Path(__file__).parent.parent.parent
-config_path = root_dir / 'config' / 'train_config.py'
+config_path = root_dir / 'config' / 'config.py'
 
 # 检查配置文件是否存在
 if not config_path.exists():
@@ -27,7 +28,7 @@ if not config_path.exists():
 sys.path.append(str(root_dir))
 
 # 导入配置
-from config.train_config import *
+from config.config import *
 
 # 训练参数设置
 NUM_EPOCHS = 100  # 训练轮数
@@ -77,7 +78,9 @@ class VAETrainer:
         model: torch.nn.Module,
         optimizer: torch.optim.Optimizer,
         device: torch.device,
-        model_save_dir: str
+        model_save_dir: str,
+        pad_token_id: int,
+        kl_weight: float = 0.1
     ):
         """初始化训练器
         
@@ -86,11 +89,15 @@ class VAETrainer:
             optimizer: 优化器
             device: 设备
             model_save_dir: 模型保存目录
+            pad_token_id: padding token的ID
+            kl_weight: KL散度的权重
         """
         self.model = model
         self.optimizer = optimizer
         self.device = device
         self.model_save_dir = model_save_dir
+        self.pad_token_id = pad_token_id
+        self.kl_weight = kl_weight
         
         # 创建模型保存目录
         os.makedirs(model_save_dir, exist_ok=True)
@@ -103,10 +110,6 @@ class VAETrainer:
         
         # 初始化最佳验证损失
         self.best_val_loss = float('inf')
-        
-        # 初始化损失函数
-        self.criterion = nn.MSELoss()  # 使用MSE损失函数
-        self.kl_weight = KL_WEIGHT  # KL散度的权重
         
         # 初始化logger
         self._setup_logger()
@@ -140,6 +143,53 @@ class VAETrainer:
         
         self.logger.info("Logger initialized")
     
+    def _compute_loss(
+        self,
+        recon_logits: torch.Tensor,
+        target_ids: torch.Tensor,
+        mu: torch.Tensor,
+        logvar: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """计算VAE损失
+        
+        Args:
+            recon_logits: 重构的logits，形状为 [batch_size, seq_len, vocab_size]
+            target_ids: 目标token IDs，形状为 [batch_size, seq_len]
+            mu: 潜在空间均值，形状为 [batch_size, latent_dim]
+            logvar: 潜在空间对数方差，形状为 [batch_size, latent_dim]
+            attention_mask: 注意力掩码，形状为 [batch_size, seq_len]（可选）
+            
+        Returns:
+            (总损失, 重构损失, KL散度)
+        """
+        batch_size = recon_logits.size(0)
+        
+        # 重构损失
+        # 将logits和targets展平为2D张量
+        logits = recon_logits.view(-1, recon_logits.size(-1))  # [batch_size * seq_len, vocab_size]
+        targets = target_ids.view(-1)  # [batch_size * seq_len]
+        
+        # 使用交叉熵损失，忽略padding token
+        recon_loss = F.cross_entropy(logits, targets, ignore_index=self.pad_token_id)
+        
+        # 如果提供了attention mask，可以计算非padding token的平均损失（可选）
+        if attention_mask is not None:
+            # 计算非padding token的数量
+            num_tokens = attention_mask.sum().item()
+            if num_tokens > 0:
+                # 只考虑非padding token的损失
+                recon_loss = recon_loss * (logits.size(0) / num_tokens)
+        
+        # KL散度
+        # 先按潜变量维度求和，再按batch求平均
+        kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
+        
+        # 总损失
+        total_loss = recon_loss + self.kl_weight * kld_loss
+        
+        return total_loss, recon_loss, kld_loss
+    
     def train_epoch(self, train_loader: DataLoader) -> None:
         """训练一个epoch
         
@@ -147,30 +197,49 @@ class VAETrainer:
             train_loader: 训练数据加载器
         """
         self.model.train()
+        total_loss = 0.0
+        total_recon_loss = 0.0
+        total_kld_loss = 0.0
+        num_batches = 0
         
         for batch in train_loader:
             # 将数据移到GPU
             batch = {k: v.to(self.device) for k, v in batch.items()}
             
             # 前向传播
-            outputs = self.model(batch)
-            reconstructed_batch, mean, logvar = outputs
+            recon_logits, mu, logvar = self.model(batch['embeddings'])
             
             # 计算损失
-            embeddings_batch = batch['embeddings']
-            recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)
-            kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
-            loss = recon_loss + KL_WEIGHT * kl_loss
+            loss, recon_loss, kld_loss = self._compute_loss(
+                recon_logits=recon_logits,
+                target_ids=batch['token_ids'],
+                mu=mu,
+                logvar=logvar,
+                attention_mask=batch['attention_mask']
+            )
             
             # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
-
-    def validate(
-        self,
-        val_loader: torch.utils.data.DataLoader
-    ) -> float:
+            
+            # 更新统计信息
+            total_loss += loss.item()
+            total_recon_loss += recon_loss.item()
+            total_kld_loss += kld_loss.item()
+            num_batches += 1
+        
+        # 计算平均损失
+        avg_loss = total_loss / num_batches
+        avg_recon_loss = total_recon_loss / num_batches
+        avg_kld_loss = total_kld_loss / num_batches
+        
+        self.logger.info(
+            f"训练损失: {avg_loss:.6f} "
+            f"(重构: {avg_recon_loss:.6f}, KL: {avg_kld_loss:.6f})"
+        )
+    
+    def validate(self, val_loader: DataLoader) -> float:
         """验证模型
         
         Args:
@@ -181,37 +250,43 @@ class VAETrainer:
         """
         self.model.eval()
         total_loss = 0.0
+        total_recon_loss = 0.0
+        total_kld_loss = 0.0
         num_batches = 0
         
         with torch.no_grad():
             for batch in val_loader:
-                try:
-                    # 检查批次格式
-                    if isinstance(batch, dict):
-                        # 将数据移到GPU
-                        batch = {k: v.to(self.device) for k, v in batch.items()}
-                        
-                        # 前向传播
-                        outputs = self.model(batch)
-                        reconstructed_batch, mean, logvar = outputs
-                        
-                        # 计算损失
-                        embeddings_batch = batch['embeddings']
-                        recon_loss = nn.MSELoss()(reconstructed_batch, embeddings_batch)
-                        kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
-                        loss = recon_loss + KL_WEIGHT * kl_loss
-                        
-                        total_loss += loss.item()
-                        num_batches += 1
-                    else:
-                        self.logger.error(f"验证加载器中遇到意外的批次格式: {type(batch)}")
-                        continue
-                except Exception as e:
-                    self.logger.error(f"处理批次时出错: {str(e)}")
-                    continue
+                # 将数据移到GPU
+                batch = {k: v.to(self.device) for k, v in batch.items()}
+                
+                # 前向传播
+                recon_logits, mu, logvar = self.model(batch['embeddings'])
+                
+                # 计算损失
+                loss, recon_loss, kld_loss = self._compute_loss(
+                    recon_logits=recon_logits,
+                    target_ids=batch['token_ids'],
+                    mu=mu,
+                    logvar=logvar,
+                    attention_mask=batch['attention_mask']
+                )
+                
+                # 更新统计信息
+                total_loss += loss.item()
+                total_recon_loss += recon_loss.item()
+                total_kld_loss += kld_loss.item()
+                num_batches += 1
         
-        avg_loss = total_loss / num_batches if num_batches > 0 else float('inf')
-        self.logger.info(f"验证损失: {avg_loss:.6f}")
+        # 计算平均损失
+        avg_loss = total_loss / num_batches
+        avg_recon_loss = total_recon_loss / num_batches
+        avg_kld_loss = total_kld_loss / num_batches
+        
+        self.logger.info(
+            f"验证损失: {avg_loss:.6f} "
+            f"(重构: {avg_recon_loss:.6f}, KL: {avg_kld_loss:.6f})"
+        )
+        
         return avg_loss
     
     def save_checkpoint(

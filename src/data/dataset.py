@@ -16,7 +16,8 @@ from config.config import (
     NUM_WORKERS,
     PIN_MEMORY,
     MAX_SEQUENCE_LENGTH,
-    DATA_PATH
+    DATA_PATH,
+    ESM_EMBEDDING_DIM
 )
 
 class ProteinDataset(Dataset):
@@ -37,6 +38,7 @@ class ProteinDataset(Dataset):
         """
         self.tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME)
         self.model = AutoModel.from_pretrained(ESM_MODEL_NAME)
+        self.model.eval()  # 设置为评估模式
         
         if sequences is None:
             # 从文件加载序列
