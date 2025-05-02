@@ -9,12 +9,18 @@ import logging
 from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
+from transformers import AutoTokenizer
 
 # 修复导入路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.models.vae_token import ESMVAEToken
-from src.utils.data_utils import create_data_loaders, ProteinDataset
-from src.utils.logger import setup_logger
+from src.utils.data_utils import (
+    create_data_loaders,
+    ProteinDataset,
+    load_sequences,
+    preprocess_and_embed
+)
+from src.utils.logger import setup_logging
 from src.utils.trainer import VAETrainer
 from config.config import (
     RANDOM_SEED,
@@ -24,26 +30,23 @@ from config.config import (
     HIDDEN_DIMS,
     LEARNING_RATE,
     NUM_EPOCHS,
-    KL_WEIGHT,
+    BETA,
     SAVE_EVERY,
     SAVE_DIR,
     LOG_DIR,
     ESM_EMBEDDING_DIM,
-    ALPHABET,
-    VOCAB_SIZE,
     MAX_SEQUENCE_LENGTH,
-    PAD_TOKEN_ID,
-    EOS_TOKEN_ID,
     ESM_MODEL_NAME,
     EARLY_STOPPING_PATIENCE,
     EARLY_STOPPING_MIN_DELTA,
     MODEL_SAVE_DIR,
     LOG_LEVEL,
-    BETA,
     EMBEDDING_FILE,
     TRAIN_TEST_SPLIT,
     NUM_WORKERS,
-    PIN_MEMORY
+    PIN_MEMORY,
+    ESM_MODEL_PATH,
+    SEQUENCE_FILE
 )
 
 def vae_token_loss(
@@ -163,10 +166,27 @@ def main():
     logger = setup_logging()
     logger.info("开始训练...")
     
+    # 检查数据文件是否存在
+    if not os.path.exists(EMBEDDING_FILE):
+        logger.info(f"数据文件 {EMBEDDING_FILE} 不存在，开始预处理数据...")
+        # 加载原始序列
+        sequences = load_sequences(SEQUENCE_FILE)
+        logger.info(f"从文件 {SEQUENCE_FILE} 中成功加载 {len(sequences)} 个序列")
+        
+        # 预处理数据
+        preprocess_and_embed(
+            sequences=sequences,
+            output_path=EMBEDDING_FILE,
+            model_path=ESM_MODEL_PATH,
+            batch_size=BATCH_SIZE,
+            max_length=MAX_SEQUENCE_LENGTH
+        )
+        logger.info(f"数据预处理完成，保存到 {EMBEDDING_FILE}")
+    
     # 创建数据加载器
     logger.info("创建数据加载器...")
     train_loader, val_loader = create_data_loaders(
-        data_file=EMBEDDING_FILE,  # 使用配置文件中的路径
+        data_file=EMBEDDING_FILE,
         batch_size=BATCH_SIZE,
         train_test_split=TRAIN_TEST_SPLIT,
         num_workers=NUM_WORKERS,
@@ -174,15 +194,23 @@ def main():
         max_sequence_length=MAX_SEQUENCE_LENGTH
     )
     
+    # 加载ESM tokenizer以获取词汇表大小
+    logger.info("加载ESM tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_PATH)
+    vocab_size = tokenizer.vocab_size
+    pad_token_id = tokenizer.pad_token_id
+    logger.info(f"ESM tokenizer词汇表大小: {vocab_size}")
+    logger.info(f"ESM tokenizer pad token ID: {pad_token_id}")
+    
     # 初始化模型
     logger.info("初始化模型...")
     model = ESMVAEToken(
         input_dim=ESM_EMBEDDING_DIM,
         hidden_dims=HIDDEN_DIMS,
         latent_dim=LATENT_DIM,
-        vocab_size=VOCAB_SIZE,
+        vocab_size=vocab_size,  # 使用ESM tokenizer的词汇表大小
         max_sequence_length=MAX_SEQUENCE_LENGTH,
-        pad_token_id=PAD_TOKEN_ID,
+        pad_token_id=pad_token_id,  # 使用ESM tokenizer的pad token ID
         use_layer_norm=True,
         dropout=0.1
     )
@@ -201,7 +229,7 @@ def main():
         model=model,
         optimizer=optimizer,
         device=DEVICE,
-        pad_token_id=PAD_TOKEN_ID,
+        pad_token_id=pad_token_id,  # 使用ESM tokenizer的pad token ID
         beta=BETA,
         max_grad_norm=1.0,
         log_dir=LOG_DIR

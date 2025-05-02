@@ -29,19 +29,13 @@ os.makedirs(ESM_OUTPUT_DIR, exist_ok=True)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # 模型配置
-ESM_MODEL_PATH = "/data1/xjiang/02.Projects/VAE/esm_model"
+ESM_MODEL_PATH = os.path.join(ROOT_DIR, "esm_model")
 ESM_MODEL_NAME = "esm2-fine-tune"
 ESM_EMBEDDING_DIM = 320
 ESM_FINETUNE_EPOCHS = 6
 
 # 序列配置
 MAX_SEQUENCE_LENGTH = 64
-ALPHABET = ['<pad>', '<eos>'] + list('ACDEFGHIKLMNPQRSTVWY')
-VOCAB_SIZE = len(ALPHABET)
-PAD_TOKEN_ID = 0
-EOS_TOKEN_ID = 1
-PAD_TOKEN = '<pad>'
-EOS_TOKEN = '<eos>'
 
 # 训练配置
 BATCH_SIZE = 32
@@ -81,17 +75,6 @@ PROGRESS_BAR = True
 # 验证配置
 def validate_config():
     """验证配置参数的一致性"""
-    # 验证特殊token
-    assert PAD_TOKEN in ALPHABET, f"PAD_TOKEN '{PAD_TOKEN}' 不在 ALPHABET 中"
-    assert EOS_TOKEN in ALPHABET, f"EOS_TOKEN '{EOS_TOKEN}' 不在 ALPHABET 中"
-    
-    # 验证token ID
-    assert PAD_TOKEN_ID == ALPHABET.index(PAD_TOKEN), f"PAD_TOKEN_ID ({PAD_TOKEN_ID}) 与 ALPHABET 中的索引不匹配"
-    assert EOS_TOKEN_ID == ALPHABET.index(EOS_TOKEN), f"EOS_TOKEN_ID ({EOS_TOKEN_ID}) 与 ALPHABET 中的索引不匹配"
-    
-    # 验证词汇表大小
-    assert VOCAB_SIZE == len(ALPHABET), f"VOCAB_SIZE ({VOCAB_SIZE}) 与 ALPHABET 长度 ({len(ALPHABET)}) 不匹配"
-    
     # 验证序列长度
     assert MAX_SEQUENCE_LENGTH > 0, "MAX_SEQUENCE_LENGTH 必须大于 0"
     
