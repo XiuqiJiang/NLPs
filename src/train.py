@@ -13,8 +13,9 @@ from tqdm import tqdm
 # 修复导入路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.models.vae_token import ESMVAEToken
-from src.data.dataset import create_data_loaders
+from src.utils.data_utils import create_data_loaders, ProteinDataset
 from src.utils.logger import setup_logger
+from src.utils.trainer import VAETrainer
 from config.config import (
     RANDOM_SEED,
     DEVICE,
@@ -38,10 +39,12 @@ from config.config import (
     EARLY_STOPPING_MIN_DELTA,
     MODEL_SAVE_DIR,
     LOG_LEVEL,
-    BETA
+    BETA,
+    EMBEDDING_FILE,
+    TRAIN_TEST_SPLIT,
+    NUM_WORKERS,
+    PIN_MEMORY
 )
-from src.utils.data_utils import ProteinDataset
-from src.utils.trainer import VAETrainer
 
 def vae_token_loss(
     recon_logits: torch.Tensor,
@@ -163,9 +166,12 @@ def main():
     # 创建数据加载器
     logger.info("创建数据加载器...")
     train_loader, val_loader = create_data_loaders(
-        data_path='data/processed/protein_data.pt',
+        data_file=EMBEDDING_FILE,  # 使用配置文件中的路径
         batch_size=BATCH_SIZE,
-        train_test_split=0.1  # 使用10%的数据作为验证集
+        train_test_split=TRAIN_TEST_SPLIT,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+        max_sequence_length=MAX_SEQUENCE_LENGTH
     )
     
     # 初始化模型

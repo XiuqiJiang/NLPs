@@ -5,38 +5,37 @@ import numpy as np
 import torch
 import random
 from typing import List, Tuple, Optional, Dict, Any
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 from transformers import AutoTokenizer, AutoModel, AutoModelForMaskedLM
-# 确保导入了正确的配置文件路径
-# from config.data_config import MAX_SEQUENCE_LENGTH, ALPHABET, NUM_WORKERS, PIN_MEMORY
-# from config.config import ESM_MODEL_NAME, EMBEDDING_FILE, SEQUENCE_FILE # 假设这些在 config.py 中
 import pandas as pd
-from tqdm import tqdm # 建议添加 tqdm 以显示进度
+from tqdm import tqdm
+
+from config.config import (
+    MAX_SEQUENCE_LENGTH,
+    ALPHABET,
+    VOCAB_SIZE,
+    PAD_TOKEN_ID,
+    EOS_TOKEN_ID,
+    NUM_WORKERS,
+    PIN_MEMORY,
+    ESM_MODEL_NAME,
+    EMBEDDING_FILE,
+    SEQUENCE_FILE,
+    ESM_MODEL_PATH,
+    DEVICE,
+    RANDOM_SEED
+)
 
 # --- 从你的 config 文件导入 ---
 # 假设你的 config.py 和 config/data_config.py 定义了这些变量
 # 如果没有，你需要在这里定义它们或从正确的地方导入
 try:
     from config.data_config import (
-        MAX_SEQUENCE_LENGTH,
-        ALPHABET,
-        SPECIAL_TOKENS,
-        VOCAB_SIZE,
-        PAD_TOKEN_ID,
-        EOS_TOKEN_ID,
-        NUM_WORKERS,
-        PIN_MEMORY
+        SPECIAL_TOKENS
     )
 except ImportError:
     print("Warning: Could not import from config.data_config. Using default values.")
-    MAX_SEQUENCE_LENGTH = 1024
-    ALPHABET = 'ACDEFGHIKLMNPQRSTVWY'
     SPECIAL_TOKENS = ['<pad>', '<eos>']
-    VOCAB_SIZE = len(ALPHABET) + len(SPECIAL_TOKENS)
-    PAD_TOKEN_ID = len(ALPHABET)
-    EOS_TOKEN_ID = len(ALPHABET) + 1
-    NUM_WORKERS = 0
-    PIN_MEMORY = False
 
 # 创建字符到ID的映射
 CHAR_TO_ID = {char: idx for idx, char in enumerate(ALPHABET)}
@@ -69,25 +68,6 @@ def pad_sequence(ids: List[int], max_length: int = MAX_SEQUENCE_LENGTH) -> List[
     else:
         ids = ids + [PAD_TOKEN_ID] * (max_length - len(ids))  # 填充到最大长度
     return ids
-
-try:
-    from config.config import (
-        ESM_MODEL_NAME, # 例如 "facebook/esm2_t6_8M_UR50D"
-        EMBEDDING_FILE, # 例如 "data/processed/embeddings.pt"
-        SEQUENCE_FILE, # 例如 "data/raw/sequences.txt"
-        VAE_BATCH_SIZE, # 例如 64
-        ESM_MODEL_PATH, # 例如 "path/to/your/esm_model"
-        DEVICE # 例如 "cuda" 或 "cpu"
-    )
-except ImportError:
-     print("Warning: Could not import from config.config. Using default values.")
-     ESM_MODEL_NAME = "facebook/esm2_t6_8M_UR50D" # 提供一个默认值
-     EMBEDDING_FILE = "embeddings.pt"
-     SEQUENCE_FILE = "sequences.txt"
-     VAE_BATCH_SIZE = 64
-     ESM_MODEL_PATH = "path/to/your/esm_model"
-     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
 
 # --- Dataset 类 ---
 class EmbeddingDataset(Dataset):
@@ -232,88 +212,53 @@ def get_esm_embeddings(
 
 # --- DataLoader 创建函数 ---
 def create_data_loaders(
-    data_path: str,
-    batch_size: int,
-    train_test_split: float = 0.15, # 注意：这里是验证集比例
-    num_workers: int = NUM_WORKERS,
-    pin_memory: bool = PIN_MEMORY,
-    max_sequence_length: int = MAX_SEQUENCE_LENGTH
+    data_file: str,
+    batch_size: int = 32,
+    train_test_split: float = 0.1,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    max_sequence_length: int = 64
 ) -> Tuple[DataLoader, DataLoader]:
-    """创建训练和验证数据加载器
-
-    Args:
-        data_path: 预计算数据的文件路径
-        batch_size: 批处理大小
-        train_test_split: 验证集比例
-        num_workers: 数据加载的工作进程数
-        pin_memory: 是否将数据固定在内存中
-        max_sequence_length: 序列的最大长度
-
-    Returns:
-        训练和验证数据加载器
-    """
-    # 加载数据以获取总样本数
-    data = torch.load(data_path)
-    num_samples = len(data['embeddings'])
+    """创建训练和验证数据加载器"""
+    # 加载数据
+    data = torch.load(data_file)
     
-    print(f"创建 DataLoaders: 总样本数={num_samples}")
-    
-    # 划分训练集和验证集索引
-    indices = np.arange(num_samples)
-    np.random.shuffle(indices) # 原地打乱
-    split_idx = int(num_samples * (1 - train_test_split)) # 训练集结束的索引
-    
-    train_indices = indices[:split_idx]
-    val_indices = indices[split_idx:]
-    
-    print(f"训练集样本数: {len(train_indices)}, 验证集样本数: {len(val_indices)}")
-    
-    # 创建数据集实例
-    print("创建训练数据集...")
-    train_dataset = ProteinDataset(
-        data_path=data_path,
-        max_length=max_sequence_length
+    # 创建数据集
+    dataset = ProteinDataset(
+        embeddings=data['embeddings'],
+        attention_masks=data['attention_masks'],
+        token_ids=data['token_ids']
     )
-    # 只使用训练集索引
-    train_dataset.embeddings = train_dataset.embeddings[train_indices]
-    train_dataset.attention_masks = train_dataset.attention_masks[train_indices]
-    train_dataset.token_ids = train_dataset.token_ids[train_indices]
-    train_dataset.sequences = [train_dataset.sequences[i] for i in train_indices]
     
-    print("创建验证数据集...")
-    val_dataset = ProteinDataset(
-        data_path=data_path,
-        max_length=max_sequence_length
+    # 计算训练集和验证集的大小
+    dataset_size = len(dataset)
+    train_size = int((1 - train_test_split) * dataset_size)
+    val_size = dataset_size - train_size
+    
+    # 随机划分数据集
+    train_dataset, val_dataset = random_split(
+        dataset,
+        [train_size, val_size],
+        generator=torch.Generator().manual_seed(RANDOM_SEED)
     )
-    # 只使用验证集索引
-    val_dataset.embeddings = val_dataset.embeddings[val_indices]
-    val_dataset.attention_masks = val_dataset.attention_masks[val_indices]
-    val_dataset.token_ids = val_dataset.token_ids[val_indices]
-    val_dataset.sequences = [val_dataset.sequences[i] for i in val_indices]
     
     # 创建数据加载器
-    print("创建 DataLoader...")
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,          # 训练时打乱
+        shuffle=True,
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=True,        # 丢弃最后一个不完整的批次
-        collate_fn=collate_fn  # 使用自定义的 collate_fn
+        pin_memory=pin_memory
     )
     
     val_loader = DataLoader(
         val_dataset,
         batch_size=batch_size,
-        shuffle=False,         # 验证时不打乱
+        shuffle=False,
         num_workers=num_workers,
-        pin_memory=pin_memory,
-        drop_last=False,       # 验证时通常不丢弃
-        collate_fn=collate_fn  # 使用自定义的 collate_fn
+        pin_memory=pin_memory
     )
     
-    print("DataLoaders 创建完成。")
     return train_loader, val_loader
 
 # --- VAE 数据准备主函数 ---
