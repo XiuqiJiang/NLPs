@@ -54,7 +54,7 @@ def vae_token_loss(
     input_ids: torch.Tensor,
     mean: torch.Tensor,
     logvar: torch.Tensor,
-    kl_weight: float = 1.0
+    epoch: int  # 添加epoch参数
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """计算VAE的损失
     
@@ -63,11 +63,14 @@ def vae_token_loss(
         input_ids: 输入的token IDs
         mean: 隐变量的均值
         logvar: 隐变量的对数方差
-        kl_weight: KL散度的权重
+        epoch: 当前epoch
         
     Returns:
         (总损失, 重建损失, KL损失)
     """
+    # 计算当前epoch的beta值
+    beta = min(epoch/50.0, 1.0)
+    
     # 计算重建损失（交叉熵）
     recon_loss = nn.CrossEntropyLoss(reduction='mean')(recon_logits.view(-1, recon_logits.size(-1)), input_ids.view(-1))
     
@@ -75,7 +78,7 @@ def vae_token_loss(
     kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
     
     # 总损失
-    loss = recon_loss + kl_weight * kl_loss
+    loss = recon_loss + beta * kl_loss
     
     return loss, recon_loss, kl_loss
 
@@ -84,7 +87,7 @@ def train_epoch(
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: str,
-    kl_weight: float,
+    epoch: int,  # 添加epoch参数
     logger: logging.Logger
 ) -> tuple[float, float, float]:
     """训练一个epoch
@@ -94,7 +97,7 @@ def train_epoch(
         dataloader: 数据加载器
         optimizer: 优化器
         device: 设备
-        kl_weight: KL散度的权重
+        epoch: 当前epoch
         logger: 日志记录器
         
     Returns:
@@ -118,7 +121,7 @@ def train_epoch(
             batch['input_ids'],
             mean,
             logvar,
-            kl_weight
+            epoch  # 传递epoch参数
         )
         
         # 反向传播

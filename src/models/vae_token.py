@@ -219,7 +219,7 @@ def vae_token_loss(
     input_ids: torch.Tensor,
     mean: torch.Tensor,
     logvar: torch.Tensor,
-    kl_weight: float = 0.1,
+    epoch: int,  # 添加epoch参数
     pad_token_id: int = 1
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """计算VAE损失
@@ -229,12 +229,15 @@ def vae_token_loss(
         input_ids: 真实的token ID，形状为(batch_size, sequence_length)
         mean: 潜在空间均值
         logvar: 潜在空间对数方差
-        kl_weight: KL散度权重
+        epoch: 当前epoch
         pad_token_id: padding token的ID
         
     Returns:
         总损失、重建损失和KL散度
     """
+    # 计算当前epoch的beta值
+    beta = min(epoch/50.0, 1.0)
+    
     # 重建损失 (使用交叉熵损失)
     # 将logits和targets展平为2D张量
     recon_loss = nn.CrossEntropyLoss(ignore_index=pad_token_id)(
@@ -246,6 +249,6 @@ def vae_token_loss(
     kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
     
     # 总损失
-    total_loss = recon_loss + kl_weight * kl_loss
+    total_loss = recon_loss + beta * kl_loss
     
     return total_loss, recon_loss, kl_loss 

@@ -114,68 +114,36 @@ class VAETrainer:
         self,
         x: torch.Tensor,
         attention_mask: torch.Tensor,
-        target_token_ids: torch.Tensor
+        target_token_ids: torch.Tensor,
+        epoch: int  # 添加epoch参数
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """计算 VAE 损失
         
         Args:
-            x: 输入张量 [batch_size, seq_len, input_dim]
-            attention_mask: 注意力掩码 [batch_size, seq_len]
-            target_token_ids: 目标 token IDs [batch_size, seq_len]
+            x: 输入张量
+            attention_mask: 注意力掩码
+            target_token_ids: 目标token ids
+            epoch: 当前epoch
             
         Returns:
-            total_loss: 总损失
-            loss_dict: 损失分量字典
+            (总损失, 损失字典)
         """
-        # 验证输入
-        if x.ndim != 3:
-            raise ValueError(f"输入张量维度必须是3 [batch_size, seq_len, input_dim], 但收到了 {x.shape}")
-        if attention_mask.ndim != 2:
-            raise ValueError(f"注意力掩码维度必须是2 [batch_size, seq_len], 但收到了 {attention_mask.shape}")
-        if target_token_ids.ndim != 2:
-            raise ValueError(f"目标token IDs维度必须是2 [batch_size, seq_len], 但收到了 {target_token_ids.shape}")
-        
-        batch_size, seq_len, input_dim = x.shape
-        if attention_mask.shape != (batch_size, seq_len):
-            raise ValueError(f"注意力掩码形状 {attention_mask.shape} 与输入形状 {x.shape} 不匹配")
-        if target_token_ids.shape != (batch_size, seq_len):
-            raise ValueError(f"目标token IDs形状 {target_token_ids.shape} 与输入形状 {x.shape} 不匹配")
-        
-        # 验证token IDs的有效性
-        if target_token_ids.max() >= self.model.vocab_size:
-            raise ValueError(f"目标token IDs包含超出词汇表大小的值: {target_token_ids.max()} >= {self.model.vocab_size}")
-        if target_token_ids.min() < 0:
-            raise ValueError(f"目标token IDs包含负值: {target_token_ids.min()}")
+        # 计算当前epoch的beta值
+        beta = min(epoch/50.0, 1.0)
         
         # 编码
-        mu, logvar = self.model.encode(x, attention_mask)
-        
-        # 验证编码输出
-        if mu.shape != (batch_size, self.model.latent_dim):
-            raise ValueError(f"mu形状 {mu.shape} 与预期形状 {(batch_size, self.model.latent_dim)} 不匹配")
-        if logvar.shape != (batch_size, self.model.latent_dim):
-            raise ValueError(f"logvar形状 {logvar.shape} 与预期形状 {(batch_size, self.model.latent_dim)} 不匹配")
+        mu, logvar = self.model.encode(x)
         
         # 重参数化
         z = self.model.reparameterize(mu, logvar)
         
-        # 验证潜在向量
-        if z.shape != (batch_size, self.model.latent_dim):
-            raise ValueError(f"潜在向量形状 {z.shape} 与预期形状 {(batch_size, self.model.latent_dim)} 不匹配")
-        
         # 解码
         logits = self.model.decode(z)
         
-        # 验证解码输出
-        if logits.shape != (batch_size, self.model.max_sequence_length, self.model.vocab_size):
-            raise ValueError(f"logits形状 {logits.shape} 与预期形状 {(batch_size, self.model.max_sequence_length, self.model.vocab_size)} 不匹配")
-        
         # 计算重构损失
-        # 将logits和target_token_ids展平为2D
         flat_logits = logits.view(-1, self.model.vocab_size)
         flat_target = target_token_ids.view(-1)
         
-        # 使用ignore_index忽略padding token
         recon_loss = F.cross_entropy(
             flat_logits,
             flat_target,
@@ -185,14 +153,14 @@ class VAETrainer:
         # 计算KL散度
         kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         
-        # 应用beta权重
-        total_loss = recon_loss + self.beta * kl_loss
+        # 使用动态beta值
+        total_loss = recon_loss + beta * kl_loss
         
-        # 记录损失分量
         loss_dict = {
             'total_loss': total_loss.item(),
             'recon_loss': recon_loss.item(),
-            'kl_loss': kl_loss.item()
+            'kl_loss': kl_loss.item(),
+            'beta': beta
         }
         
         return total_loss, loss_dict
@@ -216,59 +184,54 @@ class VAETrainer:
         total_recon_loss = 0
         total_kld_loss = 0
         
-        # 使用tqdm显示进度
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
         
         for batch in pbar:
-            # 将数据移动到正确的设备上
             batch = {k: v.to(self.device) for k, v in batch.items()}
             
-            # 计算损失
+            # 计算损失，传入当前epoch
             loss, loss_dict = self._compute_loss(
                 batch['embeddings'],
                 batch['attention_mask'],
-                batch['token_ids']
+                batch['token_ids'],
+                epoch
             )
             
-            # 反向传播
             self.optimizer.zero_grad()
             loss.backward()
             
-            # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(
                 self.model.parameters(),
                 self.max_grad_norm
             )
             
-            # 更新参数
             self.optimizer.step()
             
-            # 更新统计信息
             total_loss += loss.item()
             total_recon_loss += loss_dict['recon_loss']
             total_kld_loss += loss_dict['kl_loss']
             
-            # 更新进度条
             pbar.set_postfix({
                 'loss': f"{loss.item():.4f}",
                 'recon': f"{loss_dict['recon_loss']:.4f}",
-                'kld': f"{loss_dict['kl_loss']:.4f}"
+                'kld': f"{loss_dict['kl_loss']:.4f}",
+                'beta': f"{loss_dict['beta']:.4f}"
             })
         
-        # 计算平均损失
         num_batches = len(train_loader)
         metrics = {
             'loss': total_loss / num_batches,
             'recon_loss': total_recon_loss / num_batches,
-            'kld_loss': total_kld_loss / num_batches
+            'kld_loss': total_kld_loss / num_batches,
+            'beta': loss_dict['beta']  # 记录当前epoch的beta值
         }
         
-        # 记录日志
         self.logger.info(
             f"Epoch {epoch} - "
             f"Loss: {metrics['loss']:.4f}, "
             f"Recon: {metrics['recon_loss']:.4f}, "
-            f"KLD: {metrics['kld_loss']:.4f}"
+            f"KLD: {metrics['kld_loss']:.4f}, "
+            f"Beta: {metrics['beta']:.4f}"
         )
         
         return metrics
@@ -299,7 +262,8 @@ class VAETrainer:
             'train_kld_loss': [],
             'val_loss': [],
             'val_recon_loss': [],
-            'val_kld_loss': []
+            'val_kld_loss': [],
+            'beta': []
         }
         
         best_val_loss = float('inf')
@@ -312,6 +276,7 @@ class VAETrainer:
             history['train_loss'].append(train_metrics['loss'])
             history['train_recon_loss'].append(train_metrics['recon_loss'])
             history['train_kld_loss'].append(train_metrics['kld_loss'])
+            history['beta'].append(train_metrics['beta'])
             
             # 验证
             if val_loader is not None:
@@ -366,7 +331,8 @@ class VAETrainer:
                 loss, loss_dict = self._compute_loss(
                     batch['embeddings'],
                     batch['attention_mask'],
-                    batch['token_ids']
+                    batch['token_ids'],
+                    -1  # 使用-1表示验证集
                 )
                 
                 # 更新统计信息
