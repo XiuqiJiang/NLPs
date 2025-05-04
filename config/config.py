@@ -39,7 +39,7 @@ MAX_SEQUENCE_LENGTH = 64
 
 # 训练配置
 BATCH_SIZE = 32
-NUM_EPOCHS = 200
+NUM_EPOCHS = 500
 LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
@@ -52,7 +52,7 @@ def get_beta(epoch: int) -> float:
     Returns:
         beta值，范围从0到1
     """
-    return min(epoch/200.0, 0.5)  # 在100个epoch内逐渐增加到1.0
+    return min(epoch/500.0, 0.01)  # 在100个epoch内逐渐增加到1.0
 
 BETA = 0.0  # 初始beta值，实际值会在训练过程中通过get_beta函数计算
 TRAIN_TEST_SPLIT = 0.15
@@ -95,7 +95,7 @@ def validate_config():
     assert ESM_LEARNING_RATE > 0, "ESM_LEARNING_RATE 必须大于 0"
     
     # 验证KL权重
-    assert BETA > 0, "BETA 必须大于 0"
+
 
 # 运行配置验证
 validate_config() 
