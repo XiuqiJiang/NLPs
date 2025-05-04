@@ -162,22 +162,46 @@ def generate_sequences(
 
 def main():
     """主函数"""
+    logger = setup_logging() # 在 main 开始时设置日志
+
+    # 确保模型保存目录存在，如果不存在则创建
+    if not os.path.exists(MODEL_SAVE_DIR):
+        logger.warning(f"模型保存目录 {MODEL_SAVE_DIR} 不存在，将尝试创建。")
+        try:
+            os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
+        except OSError as e:
+            logger.error(f"无法创建目录 {MODEL_SAVE_DIR}: {e}")
+            return # 如果无法创建目录，则无法保存，提前退出
+
+    model_file_path = os.path.join(MODEL_SAVE_DIR, 'best_model.pt')
+    
+    # 检查模型文件是否存在
+    if not os.path.exists(model_file_path):
+        logger.error(f"最佳模型文件不存在: {model_file_path}")
+        return
+
     # 生成序列
     sequences = generate_sequences(
-        model_path=os.path.join(MODEL_SAVE_DIR, 'best_model.pt'),
+        model_path=model_file_path,
         num_sequences=10,
-        temperature=0.7,  # 使用更保守的温度
-        max_length=MAX_SEQUENCE_LENGTH,
-        top_k=50  # 只考虑概率最高的50个token
+        temperature=0.7,  # 使用指定的温度
+        max_length=MAX_SEQUENCE_LENGTH, # 使用 config 中的最大长度
+        top_k=10  # 只考虑概率最高的10个token
     )
-    
+
+    if not sequences:
+        logger.error("生成序列失败或未生成任何序列。")
+        return
+
     # 保存生成的序列
     output_file = os.path.join(MODEL_SAVE_DIR, 'generated_sequences.txt')
-    with open(output_file, 'w') as f:
-        for i, seq in enumerate(sequences, 1):
-            f.write(f"序列 {i}:\n{seq}\n\n")
-    
-    print(f"生成的序列已保存到 {output_file}")
+    try:
+        with open(output_file, 'w') as f:
+            for i, seq in enumerate(sequences, 1):
+                f.write(f"序列 {i}:\n{seq}\n\n")
+        logger.info(f"生成的 {len(sequences)} 个序列已保存到 {output_file}")
+    except IOError as e:
+        logger.error(f"无法写入生成的序列到文件 {output_file}: {e}")
 
 if __name__ == "__main__":
     main() 
