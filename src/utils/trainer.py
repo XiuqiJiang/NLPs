@@ -129,7 +129,7 @@ class VAETrainer:
             (总损失, 损失字典)
         """
         # 计算当前epoch的beta值
-        beta = get_beta(epoch)
+        beta = get_beta(epoch, max_beta=0.5, annealing_epochs=500)
         
         # 编码
         mu, logvar = self.model.encode(x)
@@ -137,8 +137,8 @@ class VAETrainer:
         # 重参数化
         z = self.model.reparameterize(mu, logvar)
         
-        # 解码
-        logits = self.model.decode(z)
+        # 解码（使用teacher forcing）
+        logits = self.model.decode(z, target_token_ids)
         
         # 计算重构损失
         flat_logits = logits.view(-1, self.model.vocab_size)

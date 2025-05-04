@@ -43,16 +43,28 @@ NUM_EPOCHS = 500
 LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
-def get_beta(epoch: int) -> float:
+def get_beta(epoch: int, max_beta: float = 0.5, annealing_epochs: int = 500) -> float:
     """计算当前epoch的beta值
     
     Args:
         epoch: 当前epoch
+        max_beta: 最大beta值
+        annealing_epochs: 退火的总epoch数
         
     Returns:
-        beta值，范围从0到1
+        beta值，范围从0到max_beta
     """
-    return min(epoch/500.0, 0.01)  # 在100个epoch内逐渐增加到1.0
+    warmup_epochs = 100  # 预热期epoch数
+    annealing_epochs_after_warmup = 400  # 预热后达到max_beta所需的epoch数
+    
+    if epoch < warmup_epochs:
+        return 0.0
+    else:
+        # 计算预热期结束后的当前退火阶段的epoch
+        current_annealing_epoch = epoch - warmup_epochs
+        # 线性增长 beta
+        beta = min(1.0, current_annealing_epoch / annealing_epochs_after_warmup) * max_beta
+        return beta
 
 BETA = 0.0  # 初始beta值，实际值会在训练过程中通过get_beta函数计算
 TRAIN_TEST_SPLIT = 0.15

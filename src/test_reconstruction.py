@@ -111,8 +111,8 @@ def reconstruct_sequences(
             # 直接使用mu进行重构（不使用重参数化）
             z = mu
             
-            # 解码
-            logits = model.decode(z)
+            # 解码（使用自回归模式）
+            logits = model.decode(z, target_ids=None)  # 不传入target_ids，使用自回归生成
             
             # 获取重构后的token ids
             reconstructed_token_ids = torch.argmax(logits, dim=-1)
@@ -130,6 +130,39 @@ def reconstruct_sequences(
             logger.info(f"重构序列: {reconstructed_seq}")
             logger.info(f"序列相似度: {similarity:.2%}")
 
+def generate_sequences(
+    model: ESMVAEToken,
+    tokenizer: AutoTokenizer,
+    num_sequences: int = 10,
+    device: str = DEVICE
+) -> None:
+    """生成新的序列
+    
+    Args:
+        model: VAE模型
+        tokenizer: tokenizer
+        num_sequences: 要生成的序列数量
+        device: 设备
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(f"开始生成 {num_sequences} 个新序列...")
+    
+    # 生成随机潜在向量
+    z = torch.randn(num_sequences, model.latent_dim, device=device)
+    
+    # 解码（使用自回归模式）
+    with torch.no_grad():
+        logits = model.decode(z, target_ids=None)  # 不传入target_ids，使用自回归生成
+        generated_token_ids = torch.argmax(logits, dim=-1)
+    
+    # 将生成的token ids转换回序列
+    for i in range(num_sequences):
+        sequence = tokenizer.decode(generated_token_ids[i], skip_special_tokens=True)
+        logger.info(f"\n生成的序列 {i+1}:")
+        logger.info(sequence)
+    
+    logger.info("序列生成完成！")
+
 def main():
     """主函数"""
     logger = setup_logging()
@@ -145,7 +178,7 @@ def main():
     
     # 创建数据加载器
     logger.info("创建数据加载器...")
-    train_loader, _ = create_data_loaders(
+    train_loader, val_loader = create_data_loaders(
         data_file=EMBEDDING_FILE,
         batch_size=BATCH_SIZE,
         train_test_split=TRAIN_TEST_SPLIT,
@@ -154,17 +187,25 @@ def main():
         max_sequence_length=MAX_SEQUENCE_LENGTH
     )
     
-    # 重构序列
-    logger.info("开始重构序列...")
+    # 重构序列（使用验证集）
+    logger.info("开始重构序列（使用验证集）...")
     reconstruct_sequences(
         model=model,
         tokenizer=tokenizer,
-        data_loader=train_loader,
+        data_loader=val_loader,  # 使用验证集而不是训练集
         device=DEVICE,
         num_samples=2  # 重构前2个批次的数据
     )
     
-    logger.info("重构测试完成！")
+    # 生成新序列
+    logger.info("开始生成新序列...")
+    generate_sequences(
+        model=model,
+        tokenizer=tokenizer,
+        num_sequences=5  # 生成5个新序列
+    )
+    
+    logger.info("测试完成！")
 
 if __name__ == "__main__":
     main() 

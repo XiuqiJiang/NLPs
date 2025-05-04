@@ -23,7 +23,9 @@ class ESMVAEToken(nn.Module):
         max_sequence_length: int,
         pad_token_id: int,
         use_layer_norm: bool = True,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        rnn_hidden_dim: int = 256,
+        num_rnn_layers: int = 1
     ):
         """初始化VAE模型
         
@@ -36,6 +38,8 @@ class ESMVAEToken(nn.Module):
             pad_token_id: padding token的ID
             use_layer_norm: 是否使用LayerNorm
             dropout: dropout比率
+            rnn_hidden_dim: RNN隐藏层维度
+            num_rnn_layers: RNN层数
         """
         super().__init__()
         self.input_dim = input_dim
@@ -45,17 +49,31 @@ class ESMVAEToken(nn.Module):
         self.max_sequence_length = max_sequence_length
         self.pad_token_id = pad_token_id
         self.use_layer_norm = use_layer_norm
+        self.rnn_hidden_dim = rnn_hidden_dim
+        self.num_rnn_layers = num_rnn_layers
         
-        # 构建编码器和解码器
+        # 构建编码器
         self.encoder = self.build_encoder()
-        self.decoder = self.build_decoder()
         
         # 编码器输出层
         self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
         self.fc_logvar = nn.Linear(hidden_dims[-1], latent_dim)
         
-        # 解码器输出层 - 使用hidden_dims[0]作为输入维度
-        self.fc_out = nn.Linear(hidden_dims[0], vocab_size)
+        # RNN解码器相关层
+        self.latent_to_rnn_hidden = nn.Linear(latent_dim, rnn_hidden_dim * num_rnn_layers)
+        self.decoder_embedding = nn.Embedding(vocab_size, rnn_hidden_dim)
+        self.decoder_rnn = nn.GRU(
+            input_size=rnn_hidden_dim,
+            hidden_size=rnn_hidden_dim,
+            num_layers=num_rnn_layers,
+            batch_first=True,
+            dropout=dropout if num_rnn_layers > 1 else 0
+        )
+        self.fc_out = nn.Linear(rnn_hidden_dim, vocab_size)
+        
+        # 特殊token IDs
+        self.sos_token_id = 0  # 开始token
+        self.eos_token_id = 2  # 结束token
         
         # 初始化权重
         self.apply(self._init_weights)
@@ -66,22 +84,6 @@ class ESMVAEToken(nn.Module):
         in_dim = self.input_dim
         
         for hidden_dim in self.hidden_dims:
-            layers.extend([
-                nn.Linear(in_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim) if self.use_layer_norm else nn.BatchNorm1d(hidden_dim),
-                nn.LeakyReLU(),
-                nn.Dropout(0.1)
-            ])
-            in_dim = hidden_dim
-        
-        return nn.Sequential(*layers)
-    
-    def build_decoder(self) -> nn.Module:
-        """构建解码器网络"""
-        layers = []
-        in_dim = self.latent_dim
-        
-        for hidden_dim in reversed(self.hidden_dims):
             layers.extend([
                 nn.Linear(in_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim) if self.use_layer_norm else nn.BatchNorm1d(hidden_dim),
@@ -156,48 +158,93 @@ class ESMVAEToken(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
     
-    def decode(self, z: torch.Tensor) -> torch.Tensor:
+    def decode(self, z: torch.Tensor, target_ids: Optional[torch.Tensor] = None) -> torch.Tensor:
         """解码潜在向量
         
         Args:
             z: 潜在向量，形状为 [batch_size, latent_dim]
+            target_ids: 目标token IDs，形状为 [batch_size, max_sequence_length]
             
         Returns:
             logits: 输出logits，形状为 [batch_size, max_sequence_length, vocab_size]
         """
-        # 验证输入形状
-        if z.dim() != 2:
-            raise ValueError(f"潜在向量必须是2维的 [batch_size, latent_dim]，但收到了 {z.shape}")
-        if z.size(-1) != self.latent_dim:
-            raise ValueError(f"潜在维度必须是 {self.latent_dim}，但收到了 {z.size(-1)}")
+        batch_size = z.size(0)
         
-        # 通过解码器网络
-        x = self.decoder(z)  # [batch_size, hidden_dims[-1]]
+        # 准备RNN初始隐藏状态
+        h0 = self.latent_to_rnn_hidden(z)  # [batch_size, rnn_hidden_dim * num_layers]
+        h0 = h0.view(self.num_rnn_layers, batch_size, self.rnn_hidden_dim)
         
-        # 扩展序列维度
-        x = x.unsqueeze(1).expand(-1, self.max_sequence_length, -1)  # [batch_size, max_sequence_length, hidden_dims[-1]]
-        
-        # 通过输出层
-        logits = self.fc_out(x)  # [batch_size, max_sequence_length, vocab_size]
-        
-        # 验证输出形状
-        if logits.size(-1) != self.vocab_size:
-            raise ValueError(f"输出维度必须是 {self.vocab_size}，但收到了 {logits.size(-1)}")
-        if logits.size(1) != self.max_sequence_length:
-            raise ValueError(f"序列长度必须是 {self.max_sequence_length}，但收到了 {logits.size(1)}")
+        if target_ids is not None:
+            # 使用teacher forcing
+            decoder_input_ids = target_ids[:, :-1]  # [batch_size, max_seq_len - 1]
+            sos_tokens = torch.full((batch_size, 1), self.sos_token_id, device=z.device)
+            decoder_input_ids = torch.cat([sos_tokens, decoder_input_ids], dim=1)
+            
+            decoder_inputs = self.decoder_embedding(decoder_input_ids)
+            rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
+            logits = self.fc_out(rnn_outputs)
+        else:
+            # 自回归生成
+            # 初始化输出序列
+            output_sequence = torch.full(
+                (batch_size, self.max_sequence_length),
+                self.pad_token_id,
+                device=z.device
+            )
+            
+            # 初始输入是SOS token
+            current_input = torch.full(
+                (batch_size, 1),
+                self.sos_token_id,
+                device=z.device
+            )
+            
+            # 初始隐藏状态
+            hidden = h0
+            
+            # 自回归生成序列
+            for t in range(self.max_sequence_length):
+                # 获取当前输入的嵌入
+                decoder_input = self.decoder_embedding(current_input)
+                
+                # 通过RNN
+                rnn_output, hidden = self.decoder_rnn(decoder_input, hidden)
+                
+                # 计算当前时间步的logits
+                step_logits = self.fc_out(rnn_output)
+                
+                # 获取预测的token
+                predicted_tokens = torch.argmax(step_logits, dim=-1)
+                
+                # 存储预测的token
+                output_sequence[:, t] = predicted_tokens.squeeze(1)
+                
+                # 准备下一个时间步的输入
+                current_input = predicted_tokens
+                
+                # 如果预测到EOS token，提前结束生成
+                if (predicted_tokens == self.eos_token_id).any():
+                    break
+            
+            # 将输出序列转换为logits
+            decoder_inputs = self.decoder_embedding(output_sequence)
+            rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
+            logits = self.fc_out(rnn_outputs)
         
         return logits
     
     def forward(
         self,
         x: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None
+        attention_mask: Optional[torch.Tensor] = None,
+        target_ids: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """前向传播
         
         Args:
             x: 输入张量，形状为 [batch_size, seq_len, input_dim]
             attention_mask: 注意力掩码，形状为 [batch_size, seq_len]
+            target_ids: 目标token IDs，形状为 [batch_size, max_sequence_length]
             
         Returns:
             logits: 重建的logits，形状为 [batch_size, max_sequence_length, vocab_size]
@@ -211,7 +258,7 @@ class ESMVAEToken(nn.Module):
         z = self.reparameterize(mu, logvar)
         
         # 解码
-        logits = self.decode(z)
+        logits = self.decode(z, target_ids)
         
         return logits, mu, logvar
 
@@ -228,8 +275,8 @@ def vae_token_loss(
     Args:
         recon_logits: 预测的logits，形状为(batch_size, sequence_length, vocab_size)
         input_ids: 真实的token ID，形状为(batch_size, sequence_length)
-        mean: 潜在空间均值
-        logvar: 潜在空间对数方差
+        mean: 潜在空间均值，形状为(batch_size, latent_dim)
+        logvar: 潜在空间对数方差，形状为(batch_size, latent_dim)
         epoch: 当前epoch
         pad_token_id: padding token的ID
         
@@ -237,17 +284,22 @@ def vae_token_loss(
         总损失、重建损失和KL散度
     """
     # 计算当前epoch的beta值
-    beta = get_beta(epoch)
+    beta = get_beta(epoch, max_beta=0.5, annealing_epochs=500)
     
-    # 重建损失 (使用交叉熵损失)
+    # 创建交叉熵损失函数，忽略padding token
+    recon_loss_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id, reduction='mean')
+    
+    # 计算重建损失
     # 将logits和targets展平为2D张量
-    recon_loss = nn.CrossEntropyLoss(ignore_index=pad_token_id)(
+    recon_loss = recon_loss_fn(
         recon_logits.view(-1, recon_logits.size(-1)),
         input_ids.view(-1)
     )
     
     # KL散度
-    kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
+    # 先对每个样本的潜在维度求和，再对batch取平均
+    kl_div_per_sample = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)
+    kl_loss = torch.mean(kl_div_per_sample)
     
     # 总损失
     total_loss = recon_loss + beta * kl_loss

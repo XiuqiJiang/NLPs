@@ -55,7 +55,8 @@ def vae_token_loss(
     input_ids: torch.Tensor,
     mean: torch.Tensor,
     logvar: torch.Tensor,
-    epoch: int  # 添加epoch参数
+    epoch: int,  # 添加epoch参数
+    pad_token_id: int = 1
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """计算VAE的损失
     
@@ -65,15 +66,19 @@ def vae_token_loss(
         mean: 隐变量的均值
         logvar: 隐变量的对数方差
         epoch: 当前epoch
+        pad_token_id: padding token的ID
         
     Returns:
         (总损失, 重建损失, KL损失)
     """
     # 计算当前epoch的beta值
-    beta = get_beta(epoch)
+    beta = get_beta(epoch, max_beta=0.5, annealing_epochs=500)
     
     # 计算重建损失（交叉熵）
-    recon_loss = nn.CrossEntropyLoss(reduction='mean')(recon_logits.view(-1, recon_logits.size(-1)), input_ids.view(-1))
+    recon_loss = nn.CrossEntropyLoss(reduction='mean', ignore_index=pad_token_id)(
+        recon_logits.view(-1, recon_logits.size(-1)),
+        input_ids.view(-1)
+    )
     
     # 计算KL散度
     kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
@@ -114,7 +119,11 @@ def train_epoch(
         batch = {k: v.to(device) for k, v in batch.items()}
         
         # 前向传播
-        recon_logits, mean, logvar = model(batch)
+        recon_logits, mean, logvar = model(
+            batch['embeddings'],
+            batch['attention_mask'],
+            batch['input_ids']  # 传入target_ids用于teacher forcing
+        )
         
         # 计算损失
         loss, recon_loss, kl_loss = vae_token_loss(
@@ -122,7 +131,8 @@ def train_epoch(
             batch['input_ids'],
             mean,
             logvar,
-            epoch  # 传递epoch参数
+            epoch,
+            model.pad_token_id
         )
         
         # 反向传播

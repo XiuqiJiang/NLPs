@@ -1,137 +1,58 @@
 import os
 import sys
 import torch
-import torch.nn.functional as F
-import numpy as np
-from transformers import AutoTokenizer
-from datetime import datetime
-import traceback
-from typing import Dict, Any, List, Optional
-import argparse
-from pathlib import Path
-from tqdm import tqdm
 import logging
+from pathlib import Path
+from transformers import AutoTokenizer
+from tqdm import tqdm
 
-# 修复导入路径
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# 添加项目根目录到Python路径
+root_dir = Path(__file__).parent.parent
+sys.path.append(str(root_dir))
+
 from src.models.vae_token import ESMVAEToken
 from config.config import (
-    LATENT_DIM,
-    HIDDEN_DIMS,
-    MAX_SEQUENCE_LENGTH,
-    ESM_EMBEDDING_DIM,
-    DEVICE,
+    ESM_MODEL_PATH,
     MODEL_SAVE_DIR,
-    SEQUENCE_FILE
+    DEVICE,
+    MAX_SEQUENCE_LENGTH,
+    GENERATED_SEQUENCES_PATH
 )
-
-# 使用本地ESM模型路径
-ESM_MODEL_NAME = "/content/NLPs/esm_model"  # 使用绝对路径
 
 def setup_logging():
     """设置日志"""
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler()
+        ]
     )
     return logging.getLogger(__name__)
 
-def generate_sequence(
-    model: ESMVAEToken,
-    tokenizer: AutoTokenizer,
-    temperature: float = 1.0,
-    max_length: Optional[int] = None,
-    top_k: int = 50  # 添加top-k采样
-) -> str:
-    """生成单个序列
+def load_model(model_path: str, device: str) -> tuple[ESMVAEToken, AutoTokenizer]:
+    """加载训练好的模型
     
     Args:
-        model: VAE模型
-        tokenizer: ESM tokenizer
-        temperature: 采样温度，较低的值使生成更保守
-        max_length: 最大序列长度
-        top_k: 只考虑概率最高的k个token
+        model_path: 模型文件路径
+        device: 设备
         
     Returns:
-        生成的序列
+        (模型, tokenizer)
     """
-    model.eval()
-    with torch.no_grad():
-        # 从标准正态分布采样潜在向量
-        z = torch.randn(1, model.latent_dim).to(DEVICE)
-        
-        # 解码得到logits
-        logits = model.decode(z)  # [1, max_sequence_length, vocab_size]
-        
-        # 应用温度缩放
-        logits = logits / temperature
-        
-        # 应用top-k采样
-        if top_k > 0:
-            # 确保k不超过词汇表大小
-            k = min(top_k, logits.size(-1))
-            if k > 0:
-                indices_to_remove = logits < torch.topk(logits, k)[0][..., -1, None]
-                logits[indices_to_remove] = float('-inf')
-        
-        # 计算概率
-        probs = F.softmax(logits, dim=-1)
-        
-        # 采样token IDs
-        token_ids = torch.multinomial(
-            probs.view(-1, probs.size(-1)),
-            num_samples=1
-        ).view(1, -1)
-        
-        # 转换为字符序列
-        sequence = tokenizer.decode(token_ids[0], skip_special_tokens=True)
-        
-        # 如果达到最大长度，截断序列
-        if max_length and len(sequence) > max_length:
-            sequence = sequence[:max_length]
-        
-        return sequence
-
-def generate_sequences(
-    model_path: str,
-    num_sequences: int = 10,
-    temperature: float = 0.7,  # 降低默认温度使生成更保守
-    max_length: Optional[int] = None,
-    top_k: int = 50
-) -> List[str]:
-    """生成多个序列
+    # 加载检查点
+    checkpoint = torch.load(model_path, map_location=device)
     
-    Args:
-        model_path: 模型路径
-        num_sequences: 要生成的序列数量
-        temperature: 采样温度
-        max_length: 最大序列长度
-        top_k: top-k采样参数
-        
-    Returns:
-        生成的序列列表
-    """
-    logger = setup_logging()
-    logger.info(f"从 {model_path} 加载模型...")
-    
-    # 加载模型检查点
-    checkpoint = torch.load(model_path, map_location=DEVICE)
-    
-    # 加载ESM tokenizer以获取词汇表大小
-    logger.info(f"从 {ESM_MODEL_NAME} 加载tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME)
+    # 加载tokenizer以获取词汇表大小
+    tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_PATH)
     vocab_size = tokenizer.vocab_size
     pad_token_id = tokenizer.pad_token_id
     
-    # 确保top_k不超过词汇表大小
-    top_k = min(top_k, vocab_size)
-    logger.info(f"使用top_k={top_k}（词汇表大小={vocab_size}）")
-    
     # 初始化模型
     model = ESMVAEToken(
-        input_dim=ESM_EMBEDDING_DIM,
-        hidden_dims=HIDDEN_DIMS,
-        latent_dim=LATENT_DIM,
+        input_dim=640,  # ESM-2的嵌入维度
+        hidden_dims=[512, 256],
+        latent_dim=256,
         vocab_size=vocab_size,
         max_sequence_length=MAX_SEQUENCE_LENGTH,
         pad_token_id=pad_token_id,
@@ -141,67 +62,229 @@ def generate_sequences(
     
     # 加载模型权重
     model.load_state_dict(checkpoint['model_state_dict'])
-    model.to(DEVICE)
+    model.to(device)
     model.eval()
     
-    # 生成序列
-    logger.info(f"生成 {num_sequences} 个序列...")
-    sequences = []
-    for i in range(num_sequences):
-        sequence = generate_sequence(
-            model=model,
-            tokenizer=tokenizer,
-            temperature=temperature,
-            max_length=max_length,
-            top_k=top_k
-        )
-        sequences.append(sequence)
-        logger.info(f"序列 {i+1}: {sequence}")
+    return model, tokenizer
+
+def generate_sequences(
+    model: ESMVAEToken,
+    tokenizer: AutoTokenizer,
+    num_sequences: int = 10,
+    device: str = DEVICE,
+    save_path: str = GENERATED_SEQUENCES_PATH
+) -> list[str]:
+    """生成新的序列并保存
     
-    return sequences
+    Args:
+        model: VAE模型
+        tokenizer: tokenizer
+        num_sequences: 要生成的序列数量
+        device: 设备
+        save_path: 保存路径
+        
+    Returns:
+        生成的序列列表
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(f"开始生成 {num_sequences} 个新序列...")
+    
+    # 检查tokenizer的特殊token
+    logger.info("检查tokenizer的特殊token...")
+    logger.info(f"BOS Token ID: {tokenizer.bos_token_id}")
+    logger.info(f"EOS Token ID: {tokenizer.eos_token_id}")
+    logger.info(f"CLS Token ID: {tokenizer.cls_token_id}")
+    logger.info(f"PAD Token ID: {tokenizer.pad_token_id}")
+    
+    # 选择起始token
+    if tokenizer.cls_token_id is not None:
+        logger.info("使用CLS token作为起始token")
+        start_token_id = tokenizer.cls_token_id
+    elif tokenizer.bos_token_id is not None:
+        logger.info("使用BOS token作为起始token")
+        start_token_id = tokenizer.bos_token_id
+    else:
+        logger.warning("没有找到合适的起始token，将使用PAD token")
+        start_token_id = tokenizer.pad_token_id
+    
+    # 选择结束token
+    if tokenizer.eos_token_id is not None:
+        logger.info("使用EOS token作为结束token")
+        end_token_id = tokenizer.eos_token_id
+    else:
+        logger.warning("没有找到结束token，将使用PAD token")
+        end_token_id = tokenizer.pad_token_id
+    
+    # 生成随机潜在向量
+    z = torch.randn(num_sequences, model.latent_dim, device=device)
+    
+    # 初始化生成序列
+    generated_sequences = []
+    current_token_ids = torch.full((num_sequences, 1), start_token_id, dtype=torch.long, device=device)
+    
+    # 逐步生成序列
+    with torch.no_grad():
+        for _ in range(MAX_SEQUENCE_LENGTH):
+            # 获取当前时间步的logits
+            logits = model.decode(z, current_token_ids)
+            
+            # 选择下一个token（贪婪解码）
+            next_token_ids = torch.argmax(logits[:, -1:], dim=-1)
+            
+            # 将新token添加到序列中
+            current_token_ids = torch.cat([current_token_ids, next_token_ids], dim=1)
+            
+            # 检查是否生成了结束符
+            if (next_token_ids == end_token_id).any():
+                break
+    
+    # 将生成的token ids转换回序列
+    for i in range(num_sequences):
+        sequence = tokenizer.decode(current_token_ids[i], skip_special_tokens=True)
+        generated_sequences.append(sequence)
+        logger.info(f"\n生成的序列 {i+1}:")
+        logger.info(sequence)
+    
+    # 保存生成的序列
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    with open(save_path, 'w') as f:
+        for seq in generated_sequences:
+            f.write(seq + '\n')
+    
+    logger.info(f"序列已保存到 {save_path}")
+    logger.info("序列生成完成！")
+    
+    return generated_sequences
+
+def generate_with_temperature(
+    model: ESMVAEToken,
+    tokenizer: AutoTokenizer,
+    num_sequences: int = 10,
+    temperature: float = 1.0,
+    device: str = DEVICE,
+    save_path: str = GENERATED_SEQUENCES_PATH
+) -> list[str]:
+    """使用温度采样生成序列
+    
+    Args:
+        model: VAE模型
+        tokenizer: tokenizer
+        num_sequences: 要生成的序列数量
+        temperature: 温度参数，控制采样的随机性
+        device: 设备
+        save_path: 保存路径
+        
+    Returns:
+        生成的序列列表
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(f"开始使用温度 {temperature} 生成 {num_sequences} 个新序列...")
+    
+    # 检查tokenizer的特殊token
+    logger.info("检查tokenizer的特殊token...")
+    logger.info(f"BOS Token ID: {tokenizer.bos_token_id}")
+    logger.info(f"EOS Token ID: {tokenizer.eos_token_id}")
+    logger.info(f"CLS Token ID: {tokenizer.cls_token_id}")
+    logger.info(f"PAD Token ID: {tokenizer.pad_token_id}")
+    
+    # 选择起始token
+    if tokenizer.cls_token_id is not None:
+        logger.info("使用CLS token作为起始token")
+        start_token_id = tokenizer.cls_token_id
+    elif tokenizer.bos_token_id is not None:
+        logger.info("使用BOS token作为起始token")
+        start_token_id = tokenizer.bos_token_id
+    else:
+        logger.warning("没有找到合适的起始token，将使用PAD token")
+        start_token_id = tokenizer.pad_token_id
+    
+    # 选择结束token
+    if tokenizer.eos_token_id is not None:
+        logger.info("使用EOS token作为结束token")
+        end_token_id = tokenizer.eos_token_id
+    else:
+        logger.warning("没有找到结束token，将使用PAD token")
+        end_token_id = tokenizer.pad_token_id
+    
+    # 生成随机潜在向量
+    z = torch.randn(num_sequences, model.latent_dim, device=device)
+    
+    # 初始化生成序列
+    generated_sequences = []
+    current_token_ids = torch.full((num_sequences, 1), start_token_id, dtype=torch.long, device=device)
+    
+    # 逐步生成序列
+    with torch.no_grad():
+        for _ in range(MAX_SEQUENCE_LENGTH):
+            # 获取当前时间步的logits
+            logits = model.decode(z, current_token_ids)
+            
+            # 应用温度采样
+            logits = logits[:, -1:] / temperature
+            probs = torch.softmax(logits, dim=-1)
+            
+            # 为每个序列采样下一个token
+            next_token_ids = torch.multinomial(probs.squeeze(1), 1)
+            
+            # 将新token添加到序列中
+            current_token_ids = torch.cat([current_token_ids, next_token_ids], dim=1)
+            
+            # 检查是否生成了结束符
+            if (next_token_ids == end_token_id).any():
+                break
+    
+    # 将生成的token ids转换回序列
+    for i in range(num_sequences):
+        sequence = tokenizer.decode(current_token_ids[i], skip_special_tokens=True)
+        generated_sequences.append(sequence)
+        logger.info(f"\n生成的序列 {i+1}:")
+        logger.info(sequence)
+    
+    # 保存生成的序列
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    with open(save_path, 'w') as f:
+        for seq in generated_sequences:
+            f.write(seq + '\n')
+    
+    logger.info(f"序列已保存到 {save_path}")
+    logger.info("序列生成完成！")
+    
+    return generated_sequences
 
 def main():
     """主函数"""
-    logger = setup_logging() # 在 main 开始时设置日志
-
-    # 确保模型保存目录存在，如果不存在则创建
-    if not os.path.exists(MODEL_SAVE_DIR):
-        logger.warning(f"模型保存目录 {MODEL_SAVE_DIR} 不存在，将尝试创建。")
-        try:
-            os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
-        except OSError as e:
-            logger.error(f"无法创建目录 {MODEL_SAVE_DIR}: {e}")
-            return # 如果无法创建目录，则无法保存，提前退出
-
-    model_file_path = os.path.join(MODEL_SAVE_DIR, 'best_model.pt')
+    logger = setup_logging()
+    logger.info("开始生成序列...")
     
-    # 检查模型文件是否存在
-    if not os.path.exists(model_file_path):
-        logger.error(f"最佳模型文件不存在: {model_file_path}")
-        return
-
+    # 加载模型
+    model_path = os.path.join(MODEL_SAVE_DIR, 'best_model.pt')
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"找不到模型文件: {model_path}")
+    
+    logger.info(f"加载模型: {model_path}")
+    model, tokenizer = load_model(model_path, DEVICE)
+    
     # 生成序列
-    sequences = generate_sequences(
-        model_path=model_file_path,
-        num_sequences=10,
-        temperature=0.7,  # 使用指定的温度
-        max_length=MAX_SEQUENCE_LENGTH, # 使用 config 中的最大长度
-        top_k=10  # 只考虑概率最高的10个token
+    logger.info("使用标准生成模式...")
+    standard_sequences = generate_sequences(
+        model=model,
+        tokenizer=tokenizer,
+        num_sequences=5
     )
-
-    if not sequences:
-        logger.error("生成序列失败或未生成任何序列。")
-        return
-
-    # 保存生成的序列
-    output_file = os.path.join(MODEL_SAVE_DIR, 'generated_sequences.txt')
-    try:
-        with open(output_file, 'w') as f:
-            for i, seq in enumerate(sequences, 1):
-                f.write(f"序列 {i}:\n{seq}\n\n")
-        logger.info(f"生成的 {len(sequences)} 个序列已保存到 {output_file}")
-    except IOError as e:
-        logger.error(f"无法写入生成的序列到文件 {output_file}: {e}")
+    
+    # 使用不同温度生成序列
+    logger.info("\n使用温度采样生成序列...")
+    temperatures = [0.5, 1.0, 1.5]
+    for temp in temperatures:
+        logger.info(f"\n使用温度 {temp} 生成序列:")
+        temp_sequences = generate_with_temperature(
+            model=model,
+            tokenizer=tokenizer,
+            num_sequences=3,
+            temperature=temp
+        )
+    
+    logger.info("所有序列生成完成！")
 
 if __name__ == "__main__":
     main() 
