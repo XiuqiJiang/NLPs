@@ -46,7 +46,8 @@ from config.config import (
     NUM_WORKERS,
     PIN_MEMORY,
     ESM_MODEL_PATH,
-    SEQUENCE_FILE
+    SEQUENCE_FILE,
+    get_beta
 )
 
 def vae_token_loss(
@@ -69,7 +70,7 @@ def vae_token_loss(
         (总损失, 重建损失, KL损失)
     """
     # 计算当前epoch的beta值
-    beta = min(epoch/50.0, 1.0)
+    beta = get_beta(epoch)
     
     # 计算重建损失（交叉熵）
     recon_loss = nn.CrossEntropyLoss(reduction='mean')(recon_logits.view(-1, recon_logits.size(-1)), input_ids.view(-1))

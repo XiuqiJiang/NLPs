@@ -7,7 +7,8 @@ from config.config import (
     ESM_MODEL_NAME,
     LATENT_DIM,
     HIDDEN_DIMS,
-    ESM_EMBEDDING_DIM
+    ESM_EMBEDDING_DIM,
+    get_beta
 )
 
 class ESMVAEToken(nn.Module):
@@ -236,7 +237,7 @@ def vae_token_loss(
         总损失、重建损失和KL散度
     """
     # 计算当前epoch的beta值
-    beta = min(epoch/50.0, 1.0)
+    beta = get_beta(epoch)
     
     # 重建损失 (使用交叉熵损失)
     # 将logits和targets展平为2D张量

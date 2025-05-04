@@ -129,7 +129,7 @@ class VAETrainer:
             (总损失, 损失字典)
         """
         # 计算当前epoch的beta值
-        beta = min(epoch/50.0, 1.0)
+        beta = get_beta(epoch)
         
         # 编码
         mu, logvar = self.model.encode(x)

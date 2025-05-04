@@ -39,10 +39,22 @@ MAX_SEQUENCE_LENGTH = 64
 
 # 训练配置
 BATCH_SIZE = 32
-NUM_EPOCHS = 100
+NUM_EPOCHS = 200
 LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
-BETA = min(epoch/50.0, 0.5)  # KL散度权重，固定值
+
+def get_beta(epoch: int) -> float:
+    """计算当前epoch的beta值
+    
+    Args:
+        epoch: 当前epoch
+        
+    Returns:
+        beta值，范围从0到1
+    """
+    return min(epoch/200.0, 0.5)  # 在100个epoch内逐渐增加到1.0
+
+BETA = 0.0  # 初始beta值，实际值会在训练过程中通过get_beta函数计算
 TRAIN_TEST_SPLIT = 0.15
 NUM_WORKERS = 4
 PIN_MEMORY = True
