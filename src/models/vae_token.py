@@ -163,47 +163,55 @@ class ESMVAEToken(nn.Module):
         
         Args:
             z: 潜在向量，形状为 [batch_size, latent_dim]
-            target_ids: 目标token IDs，形状为 [batch_size, max_sequence_length]
+            target_ids: 目标token IDs (用于Teacher Forcing)，形状为 [batch_size, max_sequence_length]
             
         Returns:
-            logits: 输出logits，形状为 [batch_size, max_sequence_length, vocab_size]
+            如果是 Teacher Forcing，返回 logits: [batch_size, max_sequence_length, vocab_size]
+            如果是 Autoregressive Generation，返回生成的 token IDs: [batch_size, max_sequence_length]
         """
         batch_size = z.size(0)
-        
+        device = z.device # 获取设备
+
         # 准备RNN初始隐藏状态
         h0 = self.latent_to_rnn_hidden(z)  # [batch_size, rnn_hidden_dim * num_layers]
         h0 = h0.view(self.num_rnn_layers, batch_size, self.rnn_hidden_dim)
         
         if target_ids is not None:
-            # 使用teacher forcing
+            # --- Teacher Forcing (保持不变) ---
             decoder_input_ids = target_ids[:, :-1]  # [batch_size, max_seq_len - 1]
-            sos_tokens = torch.full((batch_size, 1), self.sos_token_id, device=z.device)
+            sos_tokens = torch.full((batch_size, 1), self.sos_token_id, device=device)
             decoder_input_ids = torch.cat([sos_tokens, decoder_input_ids], dim=1)
             
             decoder_inputs = self.decoder_embedding(decoder_input_ids)
             rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
             logits = self.fc_out(rnn_outputs)
+            return logits # 返回 logits 用于计算损失
         else:
-            # 自回归生成
-            # 初始化输出序列
+            # --- Autoregressive Generation ---
             output_sequence = torch.full(
                 (batch_size, self.max_sequence_length),
                 self.pad_token_id,
-                device=z.device
+                dtype=torch.long, # 确保是 long 类型
+                device=device
             )
             
-            # 初始输入是SOS token
             current_input = torch.full(
                 (batch_size, 1),
                 self.sos_token_id,
-                device=z.device
+                dtype=torch.long, # 确保是 long 类型
+                device=device
             )
             
-            # 初始隐藏状态
             hidden = h0
             
-            # 自回归生成序列
+            # 跟踪每个序列是否已完成
+            finished_sequences = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
             for t in range(self.max_sequence_length):
+                # 跳过已经完成的序列
+                if finished_sequences.all():
+                    break
+                    
                 # 获取当前输入的嵌入
                 decoder_input = self.decoder_embedding(current_input)
                 
@@ -211,27 +219,23 @@ class ESMVAEToken(nn.Module):
                 rnn_output, hidden = self.decoder_rnn(decoder_input, hidden)
                 
                 # 计算当前时间步的logits
-                step_logits = self.fc_out(rnn_output)
+                step_logits = self.fc_out(rnn_output.squeeze(1)) # (batch_size, vocab_size)
                 
                 # 获取预测的token
-                predicted_tokens = torch.argmax(step_logits, dim=-1)
+                predicted_tokens = torch.argmax(step_logits, dim=-1) # (batch_size,)
                 
-                # 存储预测的token
-                output_sequence[:, t] = predicted_tokens.squeeze(1)
+                # 只更新未完成的序列
+                active_mask = ~finished_sequences
+                output_sequence[active_mask, t] = predicted_tokens[active_mask]
                 
-                # 准备下一个时间步的输入
-                current_input = predicted_tokens
+                # 更新当前输入（只对未完成的序列）
+                current_input = predicted_tokens.unsqueeze(1) # (batch_size, 1)
                 
-                # 如果预测到EOS token，提前结束生成
-                if (predicted_tokens == self.eos_token_id).any():
-                    break
+                # 检查是否生成了EOS token
+                eos_mask = (predicted_tokens == self.eos_token_id)
+                finished_sequences = finished_sequences | eos_mask
             
-            # 将输出序列转换为logits
-            decoder_inputs = self.decoder_embedding(output_sequence)
-            rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
-            logits = self.fc_out(rnn_outputs)
-        
-        return logits
+            return output_sequence # 直接返回生成的token IDs序列
     
     def forward(
         self,
@@ -247,9 +251,8 @@ class ESMVAEToken(nn.Module):
             target_ids: 目标token IDs，形状为 [batch_size, max_sequence_length]
             
         Returns:
-            logits: 重建的logits，形状为 [batch_size, max_sequence_length, vocab_size]
-            mu: 均值
-            logvar: 对数方差
+            如果是 Teacher Forcing，返回 (logits, mu, logvar)
+            如果是 Autoregressive Generation，返回 (token_ids, mu, logvar)
         """
         # 编码
         mu, logvar = self.encode(x, attention_mask)
@@ -258,19 +261,22 @@ class ESMVAEToken(nn.Module):
         z = self.reparameterize(mu, logvar)
         
         # 解码
-        logits = self.decode(z, target_ids)
+        output = self.decode(z, target_ids)
         
-        return logits, mu, logvar
+        return output, mu, logvar
 
 def vae_token_loss(
     recon_logits: torch.Tensor,
     input_ids: torch.Tensor,
     mean: torch.Tensor,
     logvar: torch.Tensor,
-    epoch: int,  # 添加epoch参数
-    pad_token_id: int = 1
+    epoch: int,
+    pad_token_id: int = 1,
+    max_beta: float = 0.1,  # 默认值设为0.1，与训练脚本保持一致
+    annealing_epochs: int = 500,  # 添加退火周期参数
+    kld_target: float = 1.0  # 添加目标KLD下限K
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """计算VAE损失
+    """计算VAE损失，使用Free Bits策略
     
     Args:
         recon_logits: 预测的logits，形状为(batch_size, sequence_length, vocab_size)
@@ -279,12 +285,15 @@ def vae_token_loss(
         logvar: 潜在空间对数方差，形状为(batch_size, latent_dim)
         epoch: 当前epoch
         pad_token_id: padding token的ID
+        max_beta: KL散度的最大权重
+        annealing_epochs: beta退火的周期数
+        kld_target: 目标KLD下限K，单位是nats
         
     Returns:
         总损失、重建损失和KL散度
     """
-    # 计算当前epoch的beta值
-    beta = get_beta(epoch, max_beta=1.0, annealing_epochs=500)
+    # 计算当前epoch的beta值，使用传入的参数
+    beta = get_beta(epoch, max_beta=max_beta, annealing_epochs=annealing_epochs)
     
     # 创建交叉熵损失函数，忽略padding token
     recon_loss_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id, reduction='mean')
@@ -296,12 +305,16 @@ def vae_token_loss(
         input_ids.view(-1)
     )
     
-    # KL散度
+    # 计算KL散度
     # 先对每个样本的潜在维度求和，再对batch取平均
     kl_div_per_sample = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)
     kl_loss = torch.mean(kl_div_per_sample)
     
-    # 总损失
-    total_loss = recon_loss + beta * kl_loss
+    # 使用Free Bits策略：只有当KLD超过目标值时才计算损失
+    # 公式：max(0, KLD - K)
+    free_bits_kl_loss = torch.max(torch.zeros_like(kl_loss), kl_loss - kld_target)
     
-    return total_loss, recon_loss, kl_loss 
+    # 总损失
+    total_loss = recon_loss + beta * free_bits_kl_loss
+    
+    return total_loss, recon_loss, kl_loss  # 返回原始kl_loss用于监控 

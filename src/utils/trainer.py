@@ -115,21 +115,27 @@ class VAETrainer:
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         target_token_ids: torch.Tensor,
-        epoch: int  # 添加epoch参数
+        epoch: int,  # 添加epoch参数
+        max_beta: float = 0.1,  # 添加max_beta参数
+        annealing_epochs: int = 500,  # 添加annealing_epochs参数
+        kld_target: float = 1.0  # 添加kld_target参数
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """计算 VAE 损失
+        """计算 VAE 损失，使用Free Bits策略
         
         Args:
             x: 输入张量
             attention_mask: 注意力掩码
             target_token_ids: 目标token ids
             epoch: 当前epoch
+            max_beta: KL散度的最大权重
+            annealing_epochs: beta退火的周期数
+            kld_target: 目标KLD下限K，单位是nats
             
         Returns:
             (总损失, 损失字典)
         """
-        # 计算当前epoch的beta值
-        beta = get_beta(epoch, max_beta=1.5, annealing_epochs=300)
+        # 计算当前epoch的beta值，使用传入的参数
+        beta = get_beta(epoch, max_beta=max_beta, annealing_epochs=annealing_epochs)
         
         # 编码
         mu, logvar = self.model.encode(x)
@@ -153,14 +159,19 @@ class VAETrainer:
         # 计算KL散度
         kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         
+        # 使用Free Bits策略：只有当KLD超过目标值时才计算损失
+        # 公式：max(0, KLD - K)
+        free_bits_kl_loss = torch.max(torch.zeros_like(kl_loss), kl_loss - kld_target)
+        
         # 使用动态beta值
-        total_loss = recon_loss + beta * kl_loss
+        total_loss = recon_loss + beta * free_bits_kl_loss
         
         loss_dict = {
             'total_loss': total_loss.item(),
             'recon_loss': recon_loss.item(),
-            'kl_loss': kl_loss.item(),
-            'beta': beta
+            'kl_loss': kl_loss.item(),  # 记录原始kl_loss用于监控
+            'beta': beta,
+            'kld_target': kld_target
         }
         
         return total_loss, loss_dict
@@ -168,13 +179,19 @@ class VAETrainer:
     def _train_epoch(
         self,
         train_loader: DataLoader,
-        epoch: int
+        epoch: int,
+        max_beta: float = 0.1,  # 添加max_beta参数
+        annealing_epochs: int = 500,  # 添加annealing_epochs参数
+        kld_target: float = 1.0  # 添加kld_target参数
     ) -> Dict[str, float]:
         """训练一个epoch
         
         Args:
             train_loader: 训练数据加载器
             epoch: 当前epoch
+            max_beta: KL散度的最大权重
+            annealing_epochs: beta退火的周期数
+            kld_target: 目标KLD下限K，单位是nats
             
         Returns:
             包含训练指标的字典
@@ -189,12 +206,15 @@ class VAETrainer:
         for batch in pbar:
             batch = {k: v.to(self.device) for k, v in batch.items()}
             
-            # 计算损失，传入当前epoch
+            # 计算损失，传入所有参数
             loss, loss_dict = self._compute_loss(
                 batch['embeddings'],
                 batch['attention_mask'],
                 batch['token_ids'],
-                epoch
+                epoch,
+                max_beta=max_beta,
+                annealing_epochs=annealing_epochs,
+                kld_target=kld_target
             )
             
             self.optimizer.zero_grad()
@@ -215,7 +235,8 @@ class VAETrainer:
                 'loss': f"{loss.item():.4f}",
                 'recon': f"{loss_dict['recon_loss']:.4f}",
                 'kld': f"{loss_dict['kl_loss']:.4f}",
-                'beta': f"{loss_dict['beta']:.4f}"
+                'beta': f"{loss_dict['beta']:.4f}",
+                'kld_target': f"{loss_dict['kld_target']:.4f}"
             })
         
         num_batches = len(train_loader)
@@ -223,7 +244,8 @@ class VAETrainer:
             'loss': total_loss / num_batches,
             'recon_loss': total_recon_loss / num_batches,
             'kld_loss': total_kld_loss / num_batches,
-            'beta': loss_dict['beta']  # 记录当前epoch的beta值
+            'beta': loss_dict['beta'],  # 记录当前epoch的beta值
+            'kld_target': loss_dict['kld_target']  # 记录kld_target
         }
         
         self.logger.info(
@@ -231,7 +253,8 @@ class VAETrainer:
             f"Loss: {metrics['loss']:.4f}, "
             f"Recon: {metrics['recon_loss']:.4f}, "
             f"KLD: {metrics['kld_loss']:.4f}, "
-            f"Beta: {metrics['beta']:.4f}"
+            f"Beta: {metrics['beta']:.4f}, "
+            f"KLD Target: {metrics['kld_target']:.4f}"
         )
         
         return metrics
@@ -263,7 +286,8 @@ class VAETrainer:
             'val_loss': [],
             'val_recon_loss': [],
             'val_kld_loss': [],
-            'beta': []
+            'beta': [],
+            'kld_target': []
         }
         
         best_val_loss = float('inf')
@@ -277,6 +301,7 @@ class VAETrainer:
             history['train_recon_loss'].append(train_metrics['recon_loss'])
             history['train_kld_loss'].append(train_metrics['kld_loss'])
             history['beta'].append(train_metrics['beta'])
+            history['kld_target'].append(train_metrics['kld_target'])
             
             # 验证
             if val_loader is not None:
@@ -332,7 +357,10 @@ class VAETrainer:
                     batch['embeddings'],
                     batch['attention_mask'],
                     batch['token_ids'],
-                    -1  # 使用-1表示验证集
+                    -1,  # 使用-1表示验证集
+                    max_beta=0.1,  # 使用默认max_beta
+                    annealing_epochs=500,  # 使用默认annealing_epochs
+                    kld_target=1.0  # 使用默认kld_target
                 )
                 
                 # 更新统计信息
@@ -397,7 +425,7 @@ def get_beta(epoch: int, max_beta: float = 1.0, annealing_epochs: int = 500) -> 
     Args:
         epoch: 当前epoch
         max_beta: 最大beta值
-        annealing_epochs: 退火的总epoch数
+        annealing_epochs: beta退火的周期数
         
     Returns:
         beta值，范围从0到max_beta

@@ -32,6 +32,7 @@ def setup_logging():
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         handlers=[
+            logging.FileHandler('reconstruction_test.log'),
             logging.StreamHandler()
         ]
     )
@@ -79,6 +80,7 @@ def reconstruct_sequences(
     tokenizer: AutoTokenizer,
     data_loader: DataLoader,
     device: str,
+    epoch: int,
     num_samples: int = 5
 ) -> None:
     """重构序列并比较
@@ -88,9 +90,13 @@ def reconstruct_sequences(
         tokenizer: tokenizer
         data_loader: 数据加载器
         device: 设备
+        epoch: 当前epoch
         num_samples: 要重构的样本数量
     """
     logger = logging.getLogger(__name__)
+    logger.info(f"\n{'='*50}")
+    logger.info(f"Epoch {epoch} 的重构结果:")
+    logger.info(f"{'='*50}")
     
     # 选择前num_samples个批次
     for i, batch in enumerate(data_loader):
@@ -112,10 +118,7 @@ def reconstruct_sequences(
             z = mu
             
             # 解码（使用自回归模式）
-            logits = model.decode(z, target_ids=None)  # 不传入target_ids，使用自回归生成
-            
-            # 获取重构后的token ids
-            reconstructed_token_ids = torch.argmax(logits, dim=-1)
+            reconstructed_token_ids = model.decode(z, target_ids=None)  # 直接获取生成的token IDs
         
         # 将token ids转换回序列
         for j in range(len(original_token_ids)):
@@ -133,6 +136,7 @@ def reconstruct_sequences(
 def generate_sequences(
     model: ESMVAEToken,
     tokenizer: AutoTokenizer,
+    epoch: int,
     num_sequences: int = 10,
     device: str = DEVICE
 ) -> None:
@@ -141,19 +145,21 @@ def generate_sequences(
     Args:
         model: VAE模型
         tokenizer: tokenizer
+        epoch: 当前epoch
         num_sequences: 要生成的序列数量
         device: 设备
     """
     logger = logging.getLogger(__name__)
-    logger.info(f"开始生成 {num_sequences} 个新序列...")
+    logger.info(f"\n{'='*50}")
+    logger.info(f"Epoch {epoch} 的生成结果:")
+    logger.info(f"{'='*50}")
     
     # 生成随机潜在向量
     z = torch.randn(num_sequences, model.latent_dim, device=device)
     
     # 解码（使用自回归模式）
     with torch.no_grad():
-        logits = model.decode(z, target_ids=None)  # 不传入target_ids，使用自回归生成
-        generated_token_ids = torch.argmax(logits, dim=-1)
+        generated_token_ids = model.decode(z, target_ids=None)  # 直接获取生成的token IDs
     
     # 将生成的token ids转换回序列
     for i in range(num_sequences):
@@ -163,18 +169,44 @@ def generate_sequences(
     
     logger.info("序列生成完成！")
 
+def test_epoch(epoch: int, model_path: str, val_loader: DataLoader) -> None:
+    """测试特定epoch的模型
+    
+    Args:
+        epoch: 要测试的epoch
+        model_path: 模型文件路径
+        val_loader: 验证数据加载器
+    """
+    logger = logging.getLogger(__name__)
+    logger.info(f"\n{'='*50}")
+    logger.info(f"开始测试 Epoch {epoch} 的模型")
+    logger.info(f"{'='*50}")
+    
+    # 加载模型
+    model, tokenizer = load_model(model_path, DEVICE)
+    
+    # 重构序列
+    reconstruct_sequences(
+        model=model,
+        tokenizer=tokenizer,
+        data_loader=val_loader,
+        device=DEVICE,
+        epoch=epoch,
+        num_samples=2
+    )
+    
+    # 生成新序列
+    generate_sequences(
+        model=model,
+        tokenizer=tokenizer,
+        epoch=epoch,
+        num_sequences=5
+    )
+
 def main():
     """主函数"""
     logger = setup_logging()
     logger.info("开始重构测试...")
-    
-    # 加载模型
-    model_path = os.path.join(MODEL_SAVE_DIR, 'best_model.pt')
-    if not os.path.exists(model_path):
-        raise FileNotFoundError(f"找不到模型文件: {model_path}")
-    
-    logger.info(f"加载模型: {model_path}")
-    model, tokenizer = load_model(model_path, DEVICE)
     
     # 创建数据加载器
     logger.info("创建数据加载器...")
@@ -187,23 +219,14 @@ def main():
         max_sequence_length=MAX_SEQUENCE_LENGTH
     )
     
-    # 重构序列（使用验证集）
-    logger.info("开始重构序列（使用验证集）...")
-    reconstruct_sequences(
-        model=model,
-        tokenizer=tokenizer,
-        data_loader=val_loader,  # 使用验证集而不是训练集
-        device=DEVICE,
-        num_samples=2  # 重构前2个批次的数据
-    )
-    
-    # 生成新序列
-    logger.info("开始生成新序列...")
-    generate_sequences(
-        model=model,
-        tokenizer=tokenizer,
-        num_sequences=5  # 生成5个新序列
-    )
+    # 测试不同epoch的模型
+    epochs_to_test = [100, 200, 300, 400, 500]
+    for epoch in epochs_to_test:
+        model_path = os.path.join(MODEL_SAVE_DIR, f'checkpoint_epoch_{epoch}.pt')
+        if os.path.exists(model_path):
+            test_epoch(epoch, model_path, val_loader)
+        else:
+            logger.warning(f"找不到 Epoch {epoch} 的模型文件: {model_path}")
     
     logger.info("测试完成！")
 

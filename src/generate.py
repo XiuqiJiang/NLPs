@@ -118,29 +118,14 @@ def generate_sequences(
     # 生成随机潜在向量
     z = torch.randn(num_sequences, model.latent_dim, device=device)
     
-    # 初始化生成序列
-    generated_sequences = []
-    current_token_ids = torch.full((num_sequences, 1), start_token_id, dtype=torch.long, device=device)
-    
-    # 逐步生成序列
+    # 解码（使用自回归模式）
     with torch.no_grad():
-        for _ in range(MAX_SEQUENCE_LENGTH):
-            # 获取当前时间步的logits
-            logits = model.decode(z, current_token_ids)
-            
-            # 选择下一个token（贪婪解码）
-            next_token_ids = torch.argmax(logits[:, -1:], dim=-1)
-            
-            # 将新token添加到序列中
-            current_token_ids = torch.cat([current_token_ids, next_token_ids], dim=1)
-            
-            # 检查是否生成了结束符
-            if (next_token_ids == end_token_id).any():
-                break
+        generated_token_ids = model.decode(z, target_ids=None)  # 直接获取生成的token IDs
     
     # 将生成的token ids转换回序列
+    generated_sequences = []
     for i in range(num_sequences):
-        sequence = tokenizer.decode(current_token_ids[i], skip_special_tokens=True)
+        sequence = tokenizer.decode(generated_token_ids[i], skip_special_tokens=True)
         generated_sequences.append(sequence)
         logger.info(f"\n生成的序列 {i+1}:")
         logger.info(sequence)
@@ -217,7 +202,7 @@ def generate_with_temperature(
     with torch.no_grad():
         for _ in range(MAX_SEQUENCE_LENGTH):
             # 获取当前时间步的logits
-            logits = model.decode(z, current_token_ids)
+            logits = model.decode(z, current_token_ids)  # 使用teacher forcing模式获取logits
             
             # 应用温度采样
             logits = logits[:, -1:] / temperature

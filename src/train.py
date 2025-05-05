@@ -55,10 +55,13 @@ def vae_token_loss(
     input_ids: torch.Tensor,
     mean: torch.Tensor,
     logvar: torch.Tensor,
-    epoch: int,  # 添加epoch参数
-    pad_token_id: int = 1
+    epoch: int,
+    pad_token_id: int = 1,
+    max_beta: float = 0.1,  # 默认值设为0.1，与训练脚本保持一致
+    annealing_epochs: int = 500,  # 添加退火周期参数
+    kld_target: float = 1.0  # 添加目标KLD下限K
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """计算VAE的损失
+    """计算VAE的损失，使用Free Bits策略
     
     Args:
         recon_logits: 重建的logits
@@ -67,12 +70,15 @@ def vae_token_loss(
         logvar: 隐变量的对数方差
         epoch: 当前epoch
         pad_token_id: padding token的ID
+        max_beta: KL散度的最大权重
+        annealing_epochs: beta退火的周期数
+        kld_target: 目标KLD下限K，单位是nats
         
     Returns:
         (总损失, 重建损失, KL损失)
     """
-    # 计算当前epoch的beta值
-    beta = get_beta(epoch, max_beta=1.0, annealing_epochs=500)
+    # 计算当前epoch的beta值，使用传入的参数
+    beta = get_beta(epoch, max_beta=max_beta, annealing_epochs=annealing_epochs)
     
     # 计算重建损失（交叉熵）
     recon_loss = nn.CrossEntropyLoss(reduction='mean', ignore_index=pad_token_id)(
@@ -83,18 +89,25 @@ def vae_token_loss(
     # 计算KL散度
     kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
     
-    # 总损失
-    loss = recon_loss + beta * kl_loss
+    # 使用Free Bits策略：只有当KLD超过目标值时才计算损失
+    # 公式：max(0, KLD - K)
+    free_bits_kl_loss = torch.max(torch.zeros_like(kl_loss), kl_loss - kld_target)
     
-    return loss, recon_loss, kl_loss
+    # 总损失
+    loss = recon_loss + beta * free_bits_kl_loss
+    
+    return loss, recon_loss, kl_loss  # 返回原始kl_loss用于监控
 
 def train_epoch(
     model: ESMVAEToken,
     dataloader: DataLoader,
     optimizer: torch.optim.Optimizer,
     device: str,
-    epoch: int,  # 添加epoch参数
-    logger: logging.Logger
+    epoch: int,
+    logger: logging.Logger,
+    max_beta: float = 0.1,  # 添加max_beta参数
+    annealing_epochs: int = 500,  # 添加annealing_epochs参数
+    kld_target: float = 1.0  # 添加kld_target参数
 ) -> tuple[float, float, float]:
     """训练一个epoch
     
@@ -105,6 +118,9 @@ def train_epoch(
         device: 设备
         epoch: 当前epoch
         logger: 日志记录器
+        max_beta: KL散度的最大权重
+        annealing_epochs: beta退火的周期数
+        kld_target: 目标KLD下限K，单位是nats
         
     Returns:
         (平均总损失, 平均重建损失, 平均KL损失)
@@ -125,14 +141,17 @@ def train_epoch(
             batch['input_ids']  # 传入target_ids用于teacher forcing
         )
         
-        # 计算损失
+        # 计算损失，传入所有参数
         loss, recon_loss, kl_loss = vae_token_loss(
             recon_logits,
             batch['input_ids'],
             mean,
             logvar,
             epoch,
-            model.pad_token_id
+            model.pad_token_id,
+            max_beta=max_beta,
+            annealing_epochs=annealing_epochs,
+            kld_target=kld_target
         )
         
         # 反向传播
@@ -151,7 +170,9 @@ def train_epoch(
                 f"Batch {batch_idx}/{len(dataloader)} - "
                 f"Loss: {loss.item():.4f} - "
                 f"Recon Loss: {recon_loss.item():.4f} - "
-                f"KL Loss: {kl_loss.item():.4f}"
+                f"KL Loss: {kl_loss.item():.4f} - "
+                f"Beta: {beta:.4f} - "
+                f"KLD Target: {kld_target:.4f}"
             )
     
     # 计算平均损失
