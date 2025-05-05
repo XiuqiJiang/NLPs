@@ -358,9 +358,9 @@ class VAETrainer:
                     batch['attention_mask'],
                     batch['token_ids'],
                     -1,  # 使用-1表示验证集
-                    max_beta=0.1,  # 使用默认max_beta
-                    annealing_epochs=500,  # 使用默认annealing_epochs
-                    kld_target=1.0  # 使用默认kld_target
+                    max_beta=MAX_BETA,  # 使用配置文件中的值
+                    annealing_epochs=ANNEALING_EPOCHS,  # 使用配置文件中的值
+                    kld_target=KLD_TARGET  # 使用配置文件中的值
                 )
                 
                 # 更新统计信息
@@ -419,7 +419,7 @@ class VAETrainer:
         self.logger.info(f"从 {path} 加载检查点")
         return checkpoint['epoch']
 
-def get_beta(epoch: int, max_beta: float = 1.0, annealing_epochs: int = 500) -> float:
+def get_beta(epoch: int, max_beta: float = 1.0, annealing_epochs: int = ANNEALING_EPOCHS) -> float:
     """计算当前epoch的beta值
     
     Args:
@@ -431,7 +431,7 @@ def get_beta(epoch: int, max_beta: float = 1.0, annealing_epochs: int = 500) -> 
         beta值，范围从0到max_beta
     """
     warmup_epochs = 200  # 预热期epoch数
-    annealing_epochs_after_warmup = 300  # 预热后达到max_beta所需的epoch数
+    annealing_epochs_after_warmup = 800  # 预热后达到max_beta所需的epoch数
     
     if epoch < warmup_epochs:
         return 0.0
