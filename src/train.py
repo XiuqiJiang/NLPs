@@ -47,7 +47,10 @@ from config.config import (
     PIN_MEMORY,
     ESM_MODEL_PATH,
     SEQUENCE_FILE,
-    get_beta
+    get_beta,
+    MAX_BETA,
+    ANNEALING_EPOCHS,
+    KLD_TARGET
 )
 
 def vae_token_loss(
@@ -57,9 +60,9 @@ def vae_token_loss(
     logvar: torch.Tensor,
     epoch: int,
     pad_token_id: int = 1,
-    max_beta: float = 0.1,  # 默认值设为0.1，与训练脚本保持一致
-    annealing_epochs: int = 500,  # 添加退火周期参数
-    kld_target: float = 1.0  # 添加目标KLD下限K
+    max_beta: float = MAX_BETA,  # 使用配置文件中的值
+    annealing_epochs: int = ANNEALING_EPOCHS,  # 使用配置文件中的值
+    kld_target: float = KLD_TARGET  # 使用配置文件中的值
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """计算VAE的损失，使用Free Bits策略
     
@@ -105,9 +108,9 @@ def train_epoch(
     device: str,
     epoch: int,
     logger: logging.Logger,
-    max_beta: float = 0.1,  # 添加max_beta参数
-    annealing_epochs: int = 500,  # 添加annealing_epochs参数
-    kld_target: float = 1.0  # 添加kld_target参数
+    max_beta: float = MAX_BETA,  # 使用配置文件中的值
+    annealing_epochs: int = ANNEALING_EPOCHS,  # 使用配置文件中的值
+    kld_target: float = KLD_TARGET  # 使用配置文件中的值
 ) -> tuple[float, float, float]:
     """训练一个epoch
     

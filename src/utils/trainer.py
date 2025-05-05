@@ -116,9 +116,9 @@ class VAETrainer:
         attention_mask: torch.Tensor,
         target_token_ids: torch.Tensor,
         epoch: int,  # 添加epoch参数
-        max_beta: float = 0.1,  # 添加max_beta参数
-        annealing_epochs: int = 500,  # 添加annealing_epochs参数
-        kld_target: float = 1.0  # 添加kld_target参数
+        max_beta: float = MAX_BETA,  # 使用配置文件中的值
+        annealing_epochs: int = ANNEALING_EPOCHS,  # 使用配置文件中的值
+        kld_target: float = KLD_TARGET  # 使用配置文件中的值
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """计算 VAE 损失，使用Free Bits策略
         
@@ -180,9 +180,9 @@ class VAETrainer:
         self,
         train_loader: DataLoader,
         epoch: int,
-        max_beta: float = 0.1,  # 添加max_beta参数
-        annealing_epochs: int = 500,  # 添加annealing_epochs参数
-        kld_target: float = 1.0  # 添加kld_target参数
+        max_beta: float = MAX_BETA,  # 使用配置文件中的值
+        annealing_epochs: int = ANNEALING_EPOCHS,  # 使用配置文件中的值
+        kld_target: float = KLD_TARGET  # 使用配置文件中的值
     ) -> Dict[str, float]:
         """训练一个epoch
         
