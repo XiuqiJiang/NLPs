@@ -284,7 +284,7 @@ def vae_token_loss(
         总损失、重建损失和KL散度
     """
     # 计算当前epoch的beta值
-    beta = get_beta(epoch, max_beta=0.5, annealing_epochs=500)
+    beta = get_beta(epoch, max_beta=1.0, annealing_epochs=500)
     
     # 创建交叉熵损失函数，忽略padding token
     recon_loss_fn = nn.CrossEntropyLoss(ignore_index=pad_token_id, reduction='mean')

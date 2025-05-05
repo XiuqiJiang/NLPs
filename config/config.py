@@ -43,7 +43,7 @@ NUM_EPOCHS = 500
 LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
-def get_beta(epoch: int, max_beta: float = 0.5, annealing_epochs: int = 500) -> float:
+def get_beta(epoch: int, max_beta: float = 1.0, annealing_epochs: int = 500) -> float:
     """计算当前epoch的beta值
     
     Args:
@@ -54,8 +54,8 @@ def get_beta(epoch: int, max_beta: float = 0.5, annealing_epochs: int = 500) -> 
     Returns:
         beta值，范围从0到max_beta
     """
-    warmup_epochs = 100  # 预热期epoch数
-    annealing_epochs_after_warmup = 400  # 预热后达到max_beta所需的epoch数
+    warmup_epochs = 200  # 预热期epoch数
+    annealing_epochs_after_warmup = 300  # 预热后达到max_beta所需的epoch数
     
     if epoch < warmup_epochs:
         return 0.0

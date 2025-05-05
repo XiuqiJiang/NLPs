@@ -129,7 +129,7 @@ class VAETrainer:
             (总损失, 损失字典)
         """
         # 计算当前epoch的beta值
-        beta = get_beta(epoch, max_beta=0.5, annealing_epochs=500)
+        beta = get_beta(epoch, max_beta=1.5, annealing_epochs=300)
         
         # 编码
         mu, logvar = self.model.encode(x)
@@ -389,4 +389,27 @@ class VAETrainer:
         self.pad_token_id = checkpoint['pad_token_id']
         self.beta = checkpoint['beta']
         self.logger.info(f"从 {path} 加载检查点")
-        return checkpoint['epoch'] 
+        return checkpoint['epoch']
+
+def get_beta(epoch: int, max_beta: float = 1.0, annealing_epochs: int = 500) -> float:
+    """计算当前epoch的beta值
+    
+    Args:
+        epoch: 当前epoch
+        max_beta: 最大beta值
+        annealing_epochs: 退火的总epoch数
+        
+    Returns:
+        beta值，范围从0到max_beta
+    """
+    warmup_epochs = 200  # 预热期epoch数
+    annealing_epochs_after_warmup = 300  # 预热后达到max_beta所需的epoch数
+    
+    if epoch < warmup_epochs:
+        return 0.0
+    else:
+        # 计算预热期结束后的当前退火阶段的epoch
+        current_annealing_epoch = epoch - warmup_epochs
+        # 线性增长 beta
+        beta = min(1.0, current_annealing_epoch / annealing_epochs_after_warmup) * max_beta
+        return beta 
