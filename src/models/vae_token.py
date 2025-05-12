@@ -309,15 +309,10 @@ def vae_token_loss(
     )
     
     # 计算KL散度
-    # 先对每个样本的潜在维度求和，再对batch取平均
     kl_div_per_sample = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)
     kl_loss = torch.mean(kl_div_per_sample)
     
-    # 使用Free Bits策略：只有当KLD超过目标值时才计算损失
-    # 公式：max(0, KLD - K)
-    free_bits_kl_loss = torch.max(torch.zeros_like(kl_loss), kl_loss - kld_target)
-    
-    # 总损失
-    total_loss = recon_loss + beta * free_bits_kl_loss
+    # 直接使用原始KL损失
+    total_loss = recon_loss + beta * kl_loss
     
     return total_loss, recon_loss, kl_loss  # 返回原始kl_loss用于监控 

@@ -159,19 +159,14 @@ class VAETrainer:
         # 计算KL散度
         kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
         
-        # 使用Free Bits策略：只有当KLD超过目标值时才计算损失
-        # 公式：max(0, KLD - K)
-        free_bits_kl_loss = torch.max(torch.zeros_like(kl_loss), kl_loss - kld_target)
-        
-        # 使用动态beta值
-        total_loss = recon_loss + beta * free_bits_kl_loss
+        # 直接使用原始KL损失
+        total_loss = recon_loss + beta * kl_loss
         
         loss_dict = {
             'total_loss': total_loss.item(),
             'recon_loss': recon_loss.item(),
             'kl_loss': kl_loss.item(),  # 记录原始kl_loss用于监控
-            'beta': beta,
-            'kld_target': kld_target
+            'beta': beta
         }
         
         return total_loss, loss_dict
@@ -235,8 +230,7 @@ class VAETrainer:
                 'loss': f"{loss.item():.4f}",
                 'recon': f"{loss_dict['recon_loss']:.4f}",
                 'kld': f"{loss_dict['kl_loss']:.4f}",
-                'beta': f"{loss_dict['beta']:.4f}",
-                'kld_target': f"{loss_dict['kld_target']:.4f}"
+                'beta': f"{loss_dict['beta']:.4f}"
             })
         
         num_batches = len(train_loader)
@@ -244,8 +238,7 @@ class VAETrainer:
             'loss': total_loss / num_batches,
             'recon_loss': total_recon_loss / num_batches,
             'kld_loss': total_kld_loss / num_batches,
-            'beta': loss_dict['beta'],  # 记录当前epoch的beta值
-            'kld_target': loss_dict['kld_target']  # 记录kld_target
+            'beta': loss_dict['beta']
         }
         
         self.logger.info(
@@ -253,8 +246,7 @@ class VAETrainer:
             f"Loss: {metrics['loss']:.4f}, "
             f"Recon: {metrics['recon_loss']:.4f}, "
             f"KLD: {metrics['kld_loss']:.4f}, "
-            f"Beta: {metrics['beta']:.4f}, "
-            f"KLD Target: {metrics['kld_target']:.4f}"
+            f"Beta: {metrics['beta']:.4f}"
         )
         
         return metrics
@@ -286,8 +278,7 @@ class VAETrainer:
             'val_loss': [],
             'val_recon_loss': [],
             'val_kld_loss': [],
-            'beta': [],
-            'kld_target': []
+            'beta': []
         }
         
         best_val_loss = float('inf')
@@ -301,7 +292,6 @@ class VAETrainer:
             history['train_recon_loss'].append(train_metrics['recon_loss'])
             history['train_kld_loss'].append(train_metrics['kld_loss'])
             history['beta'].append(train_metrics['beta'])
-            history['kld_target'].append(train_metrics['kld_target'])
             
             # 验证
             if val_loader is not None:

@@ -44,10 +44,9 @@ LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
 # VAE训练参数
-BETA = 0.1  # KL散度权重
-MAX_BETA = 0.1  # KL散度的最大权重
+MAX_BETA = 0.01  # KL散度的最大权重
 ANNEALING_EPOCHS = 1000  # 修改为1000个epoch
-KLD_TARGET = 1.0  # Free Bits策略中的目标KLD下限K，单位是nats
+KLD_TARGET = 0.0  # Free Bits策略中的目标KLD下限K，单位是nats
 
 def get_beta(epoch: int, max_beta: float = 0.1) -> float:
     """计算当前epoch的beta值
