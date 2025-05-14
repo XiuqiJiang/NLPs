@@ -134,6 +134,12 @@ def train_epoch(
     total_recon_loss = 0.0
     total_kl_loss = 0.0
     
+    # 添加log_var的统计信息
+    log_var_mean = 0
+    log_var_std = 0
+    log_var_min = float('inf')
+    log_var_max = float('-inf')
+    
     for batch_idx, batch in enumerate(dataloader):
         # 将数据移到设备
         batch = {k: v.to(device) for k, v in batch.items()}
@@ -167,6 +173,12 @@ def train_epoch(
         total_loss += loss.item()
         total_recon_loss += recon_loss.item()
         total_kl_loss += kl_loss.item()
+        
+        # 更新log_var统计信息
+        log_var_mean += logvar.mean().item()
+        log_var_std += logvar.std().item()
+        log_var_min = min(log_var_min, logvar.min().item())
+        log_var_max = max(log_var_max, logvar.max().item())
         
         # 记录进度
         if batch_idx % 10 == 0:
@@ -269,6 +281,12 @@ def train_epoch_new(
     total_recon_loss = 0
     total_kl_loss = 0
     
+    # 添加log_var的统计信息
+    log_var_mean = 0
+    log_var_std = 0
+    log_var_min = float('inf')
+    log_var_max = float('-inf')
+    
     pbar = tqdm(train_loader, desc='Training')
     for batch in pbar:
         # 将数据移到设备
@@ -289,11 +307,18 @@ def train_epoch_new(
         total_recon_loss += losses['recon_loss'].item()
         total_kl_loss += losses['kl_loss'].item()
         
+        # 更新log_var统计信息
+        log_var_mean += losses['log_var'].mean().item()
+        log_var_std += losses['log_var'].std().item()
+        log_var_min = min(log_var_min, losses['log_var'].min().item())
+        log_var_max = max(log_var_max, losses['log_var'].max().item())
+        
         # 更新进度条
         pbar.set_postfix({
             'loss': f"{losses['total_loss'].item():.4f}",
             'recon': f"{losses['recon_loss'].item():.4f}",
-            'kl': f"{losses['kl_loss'].item():.4f}"
+            'kl': f"{losses['kl_loss'].item():.4f}",
+            'log_var_mean': f"{losses['log_var'].mean().item():.4f}"
         })
     
     # 计算平均损失
@@ -301,7 +326,13 @@ def train_epoch_new(
     return {
         'loss': total_loss / num_batches,
         'recon_loss': total_recon_loss / num_batches,
-        'kl_loss': total_kl_loss / num_batches
+        'kl_loss': total_kl_loss / num_batches,
+        'log_var_stats': {
+            'mean': log_var_mean / num_batches,
+            'std': log_var_std / num_batches,
+            'min': log_var_min,
+            'max': log_var_max
+        }
     }
 
 @torch.no_grad()
@@ -327,6 +358,12 @@ def validate(
     total_recon_loss = 0
     total_kl_loss = 0
     
+    # 添加log_var的统计信息
+    log_var_mean = 0
+    log_var_std = 0
+    log_var_min = float('inf')
+    log_var_max = float('-inf')
+    
     for batch in tqdm(val_loader, desc='Validation'):
         # 将数据移到设备
         x = batch['embeddings'].to(device)
@@ -340,13 +377,25 @@ def validate(
         total_loss += losses['total_loss'].item()
         total_recon_loss += losses['recon_loss'].item()
         total_kl_loss += losses['kl_loss'].item()
+        
+        # 更新log_var统计信息
+        log_var_mean += losses['log_var'].mean().item()
+        log_var_std += losses['log_var'].std().item()
+        log_var_min = min(log_var_min, losses['log_var'].min().item())
+        log_var_max = max(log_var_max, losses['log_var'].max().item())
     
     # 计算平均损失
     num_batches = len(val_loader)
     return {
         'loss': total_loss / num_batches,
         'recon_loss': total_recon_loss / num_batches,
-        'kl_loss': total_kl_loss / num_batches
+        'kl_loss': total_kl_loss / num_batches,
+        'log_var_stats': {
+            'mean': log_var_mean / num_batches,
+            'std': log_var_std / num_batches,
+            'min': log_var_min,
+            'max': log_var_max
+        }
     }
 
 def save_checkpoint(
@@ -452,16 +501,24 @@ def main(args: argparse.Namespace) -> None:
             kl_weight=args.kl_weight
         )
         
-        # 记录损失
+        # 记录损失和log_var统计信息
         logging.info(
             f"Train - Loss: {train_losses['loss']:.4f}, "
             f"Recon: {train_losses['recon_loss']:.4f}, "
-            f"KL: {train_losses['kl_loss']:.4f}"
+            f"KL: {train_losses['kl_loss']:.4f}\n"
+            f"Train log_var - Mean: {train_losses['log_var_stats']['mean']:.4f}, "
+            f"Std: {train_losses['log_var_stats']['std']:.4f}, "
+            f"Min: {train_losses['log_var_stats']['min']:.4f}, "
+            f"Max: {train_losses['log_var_stats']['max']:.4f}"
         )
         logging.info(
             f"Val - Loss: {val_losses['loss']:.4f}, "
             f"Recon: {val_losses['recon_loss']:.4f}, "
-            f"KL: {val_losses['kl_loss']:.4f}"
+            f"KL: {val_losses['kl_loss']:.4f}\n"
+            f"Val log_var - Mean: {val_losses['log_var_stats']['mean']:.4f}, "
+            f"Std: {val_losses['log_var_stats']['std']:.4f}, "
+            f"Min: {val_losses['log_var_stats']['min']:.4f}, "
+            f"Max: {val_losses['log_var_stats']['max']:.4f}"
         )
         
         # 保存最佳模型
@@ -473,6 +530,18 @@ def main(args: argparse.Namespace) -> None:
                 epoch=epoch + 1,
                 losses=val_losses,
                 checkpoint_dir=args.checkpoint_dir
+            )
+            
+        # 检查潜在空间是否被过度压缩
+        if train_losses['log_var_stats']['mean'] < -10:  # 如果log_var均值过小
+            logging.warning(
+                f"警告：潜在空间可能被过度压缩！"
+                f"log_var均值 ({train_losses['log_var_stats']['mean']:.4f}) 过小"
+            )
+        if train_losses['log_var_stats']['std'] < 0.1:  # 如果log_var标准差过小
+            logging.warning(
+                f"警告：潜在空间可能缺乏多样性！"
+                f"log_var标准差 ({train_losses['log_var_stats']['std']:.4f}) 过小"
             )
 
 if __name__ == '__main__':
