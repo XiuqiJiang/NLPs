@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from tqdm import tqdm
 from transformers import AutoTokenizer
+import argparse
 
 # 修复导入路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -185,59 +186,216 @@ def train_epoch(
     
     return avg_loss, avg_recon_loss, avg_kl_loss
 
-def setup_logging():
-    """设置日志"""
-    os.makedirs(LOG_DIR, exist_ok=True)
+def setup_logging(log_dir: str) -> None:
+    """设置日志
+    
+    Args:
+        log_dir: 日志目录
+    """
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler(os.path.join(LOG_DIR, 'training.log')),
+            logging.FileHandler(log_dir / 'train.log'),
             logging.StreamHandler()
         ]
     )
-    return logging.getLogger(__name__)
 
-def main():
-    """主训练函数"""
-    # 设置日志
-    logger = setup_logging()
-    logger.info("开始训练...")
+def compute_loss(
+    model: ESMVAEToken,
+    x: torch.Tensor,
+    ring_info: torch.Tensor,
+    attention_mask: torch.Tensor,
+    kl_weight: float = 1.0
+) -> Dict[str, torch.Tensor]:
+    """计算损失
     
-    # 检查数据文件是否存在
-    if not os.path.exists(EMBEDDING_FILE):
-        logger.info(f"数据文件 {EMBEDDING_FILE} 不存在，开始预处理数据...")
-        # 加载原始序列
-        logger.info(f"从文件 {SEQUENCE_FILE} 加载序列...")
-        sequences = load_sequences(SEQUENCE_FILE)
-        logger.info(f"从文件 {SEQUENCE_FILE} 中成功加载 {len(sequences)} 个序列")
+    Args:
+        model: VAE模型
+        x: 输入序列
+        ring_info: 环数信息
+        attention_mask: 注意力掩码
+        kl_weight: KL散度权重
         
-        if len(sequences) < 10:
-            logger.warning(f"加载的序列数量过少 ({len(sequences)})，请检查数据文件")
-            return
+    Returns:
+        包含各项损失的字典
+    """
+    # 前向传播
+    outputs = model(x, ring_info, attention_mask)
+    recon_x = outputs['recon_x']
+    mu = outputs['mu']
+    log_var = outputs['log_var']
+    
+    # 重构损失
+    recon_loss = nn.MSELoss(reduction='none')(recon_x, x)
+    recon_loss = (recon_loss * attention_mask.unsqueeze(-1)).sum() / attention_mask.sum()
+    
+    # KL散度
+    kl_loss = -0.5 * torch.mean(1 + log_var - mu.pow(2) - log_var.exp())
+    
+    # 总损失
+    total_loss = recon_loss + kl_weight * kl_loss
+    
+    return {
+        'total_loss': total_loss,
+        'recon_loss': recon_loss,
+        'kl_loss': kl_loss
+    }
+
+def train_epoch_new(
+    model: ESMVAEToken,
+    train_loader: DataLoader,
+    optimizer: optim.Optimizer,
+    device: torch.device,
+    kl_weight: float
+) -> Dict[str, float]:
+    """训练一个epoch
+    
+    Args:
+        model: VAE模型
+        train_loader: 训练数据加载器
+        optimizer: 优化器
+        device: 设备
+        kl_weight: KL散度权重
         
-        # 预处理数据
-        logger.info("开始预处理数据...")
-        preprocess_and_embed(
-            sequences=sequences,
-            output_path=EMBEDDING_FILE,
-            model_path=ESM_MODEL_PATH,
-            batch_size=BATCH_SIZE,
-            max_length=MAX_SEQUENCE_LENGTH
-        )
-        logger.info(f"数据预处理完成，保存到 {EMBEDDING_FILE}")
-    else:
-        logger.info(f"使用现有的数据文件: {EMBEDDING_FILE}")
+    Returns:
+        包含各项损失的字典
+    """
+    model.train()
+    total_loss = 0
+    total_recon_loss = 0
+    total_kl_loss = 0
+    
+    pbar = tqdm(train_loader, desc='Training')
+    for batch in pbar:
+        # 将数据移到设备
+        x = batch['embeddings'].to(device)
+        ring_info = batch['ring_info'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        
+        # 计算损失
+        losses = compute_loss(model, x, ring_info, attention_mask, kl_weight)
+        
+        # 反向传播
+        optimizer.zero_grad()
+        losses['total_loss'].backward()
+        optimizer.step()
+        
+        # 更新统计信息
+        total_loss += losses['total_loss'].item()
+        total_recon_loss += losses['recon_loss'].item()
+        total_kl_loss += losses['kl_loss'].item()
+        
+        # 更新进度条
+        pbar.set_postfix({
+            'loss': f"{losses['total_loss'].item():.4f}",
+            'recon': f"{losses['recon_loss'].item():.4f}",
+            'kl': f"{losses['kl_loss'].item():.4f}"
+        })
+    
+    # 计算平均损失
+    num_batches = len(train_loader)
+    return {
+        'loss': total_loss / num_batches,
+        'recon_loss': total_recon_loss / num_batches,
+        'kl_loss': total_kl_loss / num_batches
+    }
+
+@torch.no_grad()
+def validate(
+    model: ESMVAEToken,
+    val_loader: DataLoader,
+    device: torch.device,
+    kl_weight: float
+) -> Dict[str, float]:
+    """验证模型
+    
+    Args:
+        model: VAE模型
+        val_loader: 验证数据加载器
+        device: 设备
+        kl_weight: KL散度权重
+        
+    Returns:
+        包含各项损失的字典
+    """
+    model.eval()
+    total_loss = 0
+    total_recon_loss = 0
+    total_kl_loss = 0
+    
+    for batch in tqdm(val_loader, desc='Validation'):
+        # 将数据移到设备
+        x = batch['embeddings'].to(device)
+        ring_info = batch['ring_info'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        
+        # 计算损失
+        losses = compute_loss(model, x, ring_info, attention_mask, kl_weight)
+        
+        # 更新统计信息
+        total_loss += losses['total_loss'].item()
+        total_recon_loss += losses['recon_loss'].item()
+        total_kl_loss += losses['kl_loss'].item()
+    
+    # 计算平均损失
+    num_batches = len(val_loader)
+    return {
+        'loss': total_loss / num_batches,
+        'recon_loss': total_recon_loss / num_batches,
+        'kl_loss': total_kl_loss / num_batches
+    }
+
+def save_checkpoint(
+    model: ESMVAEToken,
+    optimizer: optim.Optimizer,
+    epoch: int,
+    losses: Dict[str, float],
+    checkpoint_dir: str
+) -> None:
+    """保存检查点
+    
+    Args:
+        model: VAE模型
+        optimizer: 优化器
+        epoch: 当前epoch
+        losses: 损失字典
+        checkpoint_dir: 检查点目录
+    """
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
+    checkpoint = {
+        'epoch': epoch,
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'losses': losses
+    }
+    
+    torch.save(checkpoint, checkpoint_dir / f'checkpoint_epoch_{epoch}.pt')
+    logging.info(f"保存检查点到 {checkpoint_dir / f'checkpoint_epoch_{epoch}.pt'}")
+
+def main(args: argparse.Namespace) -> None:
+    """主函数
+    
+    Args:
+        args: 命令行参数
+    """
+    # 设置设备
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logging.info(f"使用设备: {device}")
     
     # 创建数据加载器
-    logger.info("创建数据加载器...")
     train_loader, val_loader = create_data_loaders(
-        data_file=EMBEDDING_FILE,
-        batch_size=BATCH_SIZE,
-        train_test_split=TRAIN_TEST_SPLIT,
-        num_workers=NUM_WORKERS,
-        pin_memory=PIN_MEMORY,
-        max_sequence_length=MAX_SEQUENCE_LENGTH
+        data_file=args.data_file,
+        batch_size=args.batch_size,
+        train_test_split=args.val_split,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        max_sequence_length=args.max_length
     )
     
     # 加载ESM tokenizer以获取词汇表大小
@@ -259,7 +417,7 @@ def main():
         pad_token_id=pad_token_id,  # 使用ESM tokenizer的pad token ID
         use_layer_norm=True,
         dropout=0.1
-    )
+    ).to(device)
     
     # 初始化优化器
     logger.info("初始化优化器...")
@@ -269,33 +427,79 @@ def main():
         weight_decay=0.01  # 添加L2正则化
     )
     
-    # 初始化训练器
-    logger.info("初始化训练器...")
-    trainer = VAETrainer(
-        model=model,
-        optimizer=optimizer,
-        device=DEVICE,
-        pad_token_id=pad_token_id,  # 使用ESM tokenizer的pad token ID
-        beta=BETA,
-        max_grad_norm=1.0,
-        log_dir=LOG_DIR
-    )
+    # 设置日志
+    setup_logging(args.log_dir)
     
-    # 创建模型保存目录
-    os.makedirs(MODEL_SAVE_DIR, exist_ok=True)
-    
-    # 训练模型
-    logger.info("开始训练...")
-    history = trainer.train(
-        train_loader=train_loader,
-        num_epochs=NUM_EPOCHS,
-        val_loader=val_loader,
-        save_dir=MODEL_SAVE_DIR,
-        save_freq=5
-    )
-    
-    logger.info("训练完成！")
-    return history
+    # 训练循环
+    best_val_loss = float('inf')
+    for epoch in range(args.epochs):
+        logging.info(f"Epoch {epoch + 1}/{args.epochs}")
+        
+        # 训练
+        train_losses = train_epoch_new(
+            model=model,
+            train_loader=train_loader,
+            optimizer=optimizer,
+            device=device,
+            kl_weight=args.kl_weight
+        )
+        
+        # 验证
+        val_losses = validate(
+            model=model,
+            val_loader=val_loader,
+            device=device,
+            kl_weight=args.kl_weight
+        )
+        
+        # 记录损失
+        logging.info(
+            f"Train - Loss: {train_losses['loss']:.4f}, "
+            f"Recon: {train_losses['recon_loss']:.4f}, "
+            f"KL: {train_losses['kl_loss']:.4f}"
+        )
+        logging.info(
+            f"Val - Loss: {val_losses['loss']:.4f}, "
+            f"Recon: {val_losses['recon_loss']:.4f}, "
+            f"KL: {val_losses['kl_loss']:.4f}"
+        )
+        
+        # 保存最佳模型
+        if val_losses['loss'] < best_val_loss:
+            best_val_loss = val_losses['loss']
+            save_checkpoint(
+                model=model,
+                optimizer=optimizer,
+                epoch=epoch + 1,
+                losses=val_losses,
+                checkpoint_dir=args.checkpoint_dir
+            )
 
-if __name__ == "__main__":
-    main() 
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='训练条件VAE模型')
+    
+    # 数据参数
+    parser.add_argument('--data_file', type=str, required=True, help='数据文件路径')
+    parser.add_argument('--max_length', type=int, default=64, help='最大序列长度')
+    parser.add_argument('--batch_size', type=int, default=32, help='批次大小')
+    parser.add_argument('--val_split', type=float, default=0.15, help='验证集比例')
+    parser.add_argument('--num_workers', type=int, default=4, help='数据加载线程数')
+    
+    # 模型参数
+    parser.add_argument('--input_dim', type=int, default=320, help='输入维度（ESM嵌入维度）')
+    parser.add_argument('--hidden_dim', type=int, default=512, help='隐藏层维度')
+    parser.add_argument('--latent_dim', type=int, default=256, help='潜在空间维度')
+    parser.add_argument('--num_rings', type=int, default=10, help='环数类别数')
+    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout比率')
+    
+    # 训练参数
+    parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
+    parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
+    parser.add_argument('--kl_weight', type=float, default=1.0, help='KL散度权重')
+    
+    # 其他参数
+    parser.add_argument('--log_dir', type=str, default='logs', help='日志目录')
+    parser.add_argument('--checkpoint_dir', type=str, default='checkpoints', help='检查点目录')
+    
+    args = parser.parse_args()
+    main(args) 

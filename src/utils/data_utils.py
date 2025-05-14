@@ -9,6 +9,9 @@ from torch.utils.data import Dataset, DataLoader, random_split
 from transformers import AutoTokenizer, AutoModel, AutoModelForMaskedLM
 import pandas as pd
 from tqdm import tqdm
+import logging
+from pathlib import Path
+from .ring_utils import get_ring_info
 
 from config.config import (
     MAX_SEQUENCE_LENGTH,
@@ -24,90 +27,59 @@ from config.config import (
 
 # --- Dataset 类 ---
 class ProteinDataset(Dataset):
-    """蛋白质序列数据集，从预计算的文件加载数据"""
-
+    """蛋白质序列数据集"""
+    
     def __init__(
         self,
-        data_path: str,
-        max_length: int = MAX_SEQUENCE_LENGTH
-    ) -> None:
+        sequences: List[str],
+        embeddings: torch.Tensor,
+        tokenizer: AutoTokenizer,
+        max_length: int
+    ):
         """初始化数据集
         
         Args:
-            data_path: 预计算数据的文件路径
-            max_length: 序列的最大长度
+            sequences: 序列列表
+            embeddings: ESM嵌入张量
+            tokenizer: tokenizer
+            max_length: 最大序列长度
         """
-        # 验证最大长度
-        if max_length <= 0:
-            raise ValueError(f"最大长度必须大于0，但收到了 {max_length}")
-        if max_length > MAX_SEQUENCE_LENGTH:
-            raise ValueError(f"最大长度不能超过配置的最大长度 {MAX_SEQUENCE_LENGTH}，但收到了 {max_length}")
-        
-        # 加载数据
-        data = torch.load(data_path)
-        
-        # 验证数据完整性
-        required_keys = ['embeddings', 'attention_masks', 'token_ids', 'sequences', 'config']
-        for key in required_keys:
-            if key not in data:
-                raise ValueError(f"数据文件缺少必需的键: {key}")
-        
-        # 验证配置一致性
-        config = data['config']
-        if config['max_length'] != max_length:
-            raise ValueError(f"数据文件中的最大长度 ({config['max_length']}) 与指定的最大长度 ({max_length}) 不匹配")
-        
-        # 确保数据在 CPU 上
-        self.embeddings = data['embeddings'].cpu().float()
-        self.attention_masks = data['attention_masks'].cpu()
-        self.token_ids = data['token_ids'].cpu()
-        self.sequences = data['sequences']
+        self.sequences = sequences
+        self.embeddings = embeddings
+        self.tokenizer = tokenizer
         self.max_length = max_length
         
-        # 验证数据形状
-        if self.embeddings.ndim != 3:
-            raise ValueError(f"Embeddings 的维度必须是 3 [N, seq_len, embed_dim], 但收到了 {self.embeddings.shape}")
-        if self.attention_masks.ndim != 2:
-            raise ValueError(f"Attention masks 的维度必须是 2 [N, seq_len], 但收到了 {self.attention_masks.shape}")
-        if self.token_ids.ndim != 2:
-            raise ValueError(f"Token IDs 的维度必须是 2 [N, seq_len], 但收到了 {self.token_ids.shape}")
-        if len(self.embeddings) != len(self.sequences):
-            raise ValueError(f"Embeddings ({len(self.embeddings)}) 和 sequences ({len(self.sequences)}) 数量不匹配")
+        # 计算每个序列的环数
+        self.ring_info = torch.tensor([get_ring_info(seq) for seq in sequences], dtype=torch.long)
         
-        # 验证序列长度
-        if self.embeddings.shape[1] != max_length:
-            raise ValueError(f"Embeddings 序列长度 ({self.embeddings.shape[1]}) 与最大长度 ({max_length}) 不匹配")
-        if self.attention_masks.shape[1] != max_length:
-            raise ValueError(f"Attention masks 序列长度 ({self.attention_masks.shape[1]}) 与最大长度 ({max_length}) 不匹配")
-        if self.token_ids.shape[1] != max_length:
-            raise ValueError(f"Token IDs 序列长度 ({self.token_ids.shape[1]}) 与最大长度 ({max_length}) 不匹配")
-        
-        print(f"ProteinDataset 初始化: {len(self.embeddings)} 个样本")
-        print(f"Embeddings 形状: {self.embeddings.shape}")
-        print(f"Attention masks 形状: {self.attention_masks.shape}")
-        print(f"Token IDs 形状: {self.token_ids.shape}")
-
+        # 记录环数分布
+        ring_dist = {}
+        for rings in self.ring_info:
+            ring_dist[rings.item()] = ring_dist.get(rings.item(), 0) + 1
+        logging.info(f"环数分布: {ring_dist}")
+    
     def __len__(self) -> int:
-        return len(self.embeddings)
-
+        return len(self.sequences)
+    
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        """获取数据项
+        sequence = self.sequences[idx]
+        embedding = self.embeddings[idx]
+        ring_info = self.ring_info[idx]
         
-        Args:
-            idx: 索引
-            
-        Returns:
-            包含以下键的字典:
-            - 'embeddings': 形状为 [seq_len, embed_dim] 的 tensor
-            - 'attention_mask': 形状为 [seq_len] 的 tensor
-            - 'token_ids': 形状为 [seq_len] 的 tensor
-            - 'sequence_id': 序列的索引
-        """
+        # 编码序列
+        encoding = self.tokenizer(
+            sequence,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+        
         return {
-            'embeddings': self.embeddings[idx],  # [seq_len, embed_dim]
-            'attention_mask': self.attention_masks[idx],  # [seq_len]
-            'token_ids': self.token_ids[idx],  # [seq_len]
-            'sequence_id': idx
+            'token_ids': encoding['input_ids'].squeeze(0),
+            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'embeddings': embedding,
+            'ring_info': ring_info
         }
 
 # --- 数据加载函数 ---
@@ -147,46 +119,45 @@ def load_sequences(file_path: str) -> List[str]:
 # --- DataLoader 创建函数 ---
 def create_data_loaders(
     data_file: str,
-    batch_size: int = 32,
-    train_test_split: float = 0.1,
-    num_workers: int = NUM_WORKERS,
-    pin_memory: bool = PIN_MEMORY,
-    max_sequence_length: int = MAX_SEQUENCE_LENGTH
+    batch_size: int,
+    train_test_split: float = 0.15,
+    num_workers: int = 4,
+    pin_memory: bool = True,
+    max_sequence_length: int = 64
 ) -> Tuple[DataLoader, DataLoader]:
-    """创建训练和验证数据加载器
+    """创建数据加载器
     
     Args:
-        data_file: 预计算数据的文件路径
-        batch_size: 批处理大小
-        train_test_split: 验证集比例
-        num_workers: 数据加载的工作进程数
-        pin_memory: 是否将张量固定在内存中
-        max_sequence_length: 序列的最大长度
+        data_file: 数据文件路径
+        batch_size: 批次大小
+        train_test_split: 训练集比例
+        num_workers: 数据加载线程数
+        pin_memory: 是否使用固定内存
+        max_sequence_length: 最大序列长度
         
     Returns:
-        (train_loader, val_loader): 训练和验证数据加载器
+        (训练数据加载器, 验证数据加载器)
     """
-    # 直接使用 data_file 路径创建数据集
+    # 加载数据
+    data = torch.load(data_file)
+    sequences = data['sequences']
+    embeddings = data['embeddings']
+    
+    # 加载tokenizer
+    tokenizer = AutoTokenizer.from_pretrained("facebook/esm2-t6-8M-UR50D")
+    
+    # 创建数据集
     dataset = ProteinDataset(
-        data_path=data_file,
+        sequences=sequences,
+        embeddings=embeddings,
+        tokenizer=tokenizer,
         max_length=max_sequence_length
     )
     
-    # 计算训练集和验证集的大小
-    dataset_size = len(dataset)
-    # 确保至少有一个验证样本
-    val_size = max(1, int(train_test_split * dataset_size))
-    train_size = dataset_size - val_size
-    
-    if train_size <= 0:
-        raise ValueError("训练集大小计算后小于等于0，请检查 train_test_split 或数据集大小")
-    
-    # 随机划分数据集
-    train_dataset, val_dataset = random_split(
-        dataset,
-        [train_size, val_size],
-        generator=torch.Generator().manual_seed(RANDOM_SEED)
-    )
+    # 划分训练集和验证集
+    train_size = int((1 - train_test_split) * len(dataset))
+    val_size = len(dataset) - train_size
+    train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
     
     # 创建数据加载器
     train_loader = DataLoader(
@@ -205,7 +176,6 @@ def create_data_loaders(
         pin_memory=pin_memory
     )
     
-    print(f"创建 DataLoaders: 训练集 {len(train_dataset)} 样本, 验证集 {len(val_dataset)} 样本")
     return train_loader, val_loader
 
 def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
