@@ -180,6 +180,10 @@ class ESMVAEToken(nn.Module):
         h0 = h0.view(self.num_rnn_layers, batch_size, self.rnn_hidden_dim)
         
         if target_ids is not None:
+            # 验证target_ids的维度
+            if target_ids.dim() != 2:
+                raise ValueError(f"target_ids必须是2维的 [batch_size, seq_len]，但收到了 {target_ids.shape}")
+            
             # --- Teacher Forcing (保持不变) ---
             decoder_input_ids = target_ids[:, :-1]  # [batch_size, max_seq_len - 1]
             sos_tokens = torch.full((batch_size, 1), self.sos_token_id, device=device)
@@ -254,8 +258,10 @@ class ESMVAEToken(nn.Module):
             target_ids: 目标token IDs，形状为 [batch_size, max_sequence_length]
             
         Returns:
-            如果是 Teacher Forcing，返回 (logits, mu, logvar)
-            如果是 Autoregressive Generation，返回 (token_ids, mu, logvar)
+            (recon_logits, mu, logvar)
+            recon_logits: 重构的logits，形状为 [batch_size, seq_len, vocab_size]
+            mu: 均值，形状为 [batch_size, latent_dim]
+            logvar: 对数方差，形状为 [batch_size, latent_dim]
         """
         # 编码
         mu, logvar = self.encode(x, attention_mask)
@@ -264,9 +270,9 @@ class ESMVAEToken(nn.Module):
         z = self.reparameterize(mu, logvar)
         
         # 解码
-        output = self.decode(z, target_ids)
+        recon_logits = self.decode(z, target_ids)
         
-        return output, mu, logvar
+        return recon_logits, mu, logvar
 
 def vae_token_loss(
     recon_logits: torch.Tensor,

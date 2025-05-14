@@ -79,7 +79,7 @@ GRADIENT_CLIPPING = 1.0
 
 # 模型架构配置
 HIDDEN_DIMS = [512, 256]
-LATENT_DIM = 256
+LATENT_DIM = 256  # 环数类别数
 
 # 随机种子
 RANDOM_SEED = 42

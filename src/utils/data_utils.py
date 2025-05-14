@@ -75,9 +75,20 @@ class ProteinDataset(Dataset):
             return_tensors='pt'
         )
         
+        # 确保所有张量的维度正确
+        attention_mask = encoding['attention_mask'].squeeze(0)  # [seq_len]
+        input_ids = encoding['input_ids'].squeeze(0)  # [seq_len]
+        
+        # 打印调试信息
+        if idx == 0:  # 只打印第一个样本的信息
+            print(f"Debug - Sequence: {sequence}")
+            print(f"Debug - Input IDs shape: {input_ids.shape}")
+            print(f"Debug - Attention mask shape: {attention_mask.shape}")
+            print(f"Debug - Embedding shape: {embedding.shape}")
+        
         return {
-            'token_ids': encoding['input_ids'].squeeze(0),
-            'attention_mask': encoding['attention_mask'].squeeze(0),
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
             'embeddings': embedding,
             'ring_info': ring_info
         }
@@ -144,7 +155,10 @@ def create_data_loaders(
     embeddings = data['embeddings']
     
     # 加载tokenizer
-    tokenizer = AutoTokenizer.from_pretrained("facebook/esm2-t6-8M-UR50D")
+    tokenizer = AutoTokenizer.from_pretrained(
+        ESM_MODEL_PATH,  # 使用config.py中定义的路径
+        local_files_only=True  # 强制使用本地文件
+    )
     
     # 创建数据集
     dataset = ProteinDataset(
@@ -188,8 +202,8 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
         包含以下键的字典:
         - 'embeddings': 形状为 [batch_size, seq_len, embed_dim] 的 tensor
         - 'attention_mask': 形状为 [batch_size, seq_len] 的 tensor
-        - 'token_ids': 形状为 [batch_size, seq_len] 的 tensor
-        - 'sequence_ids': 形状为 [batch_size] 的 tensor
+        - 'input_ids': 形状为 [batch_size, seq_len] 的 tensor
+        - 'ring_info': 形状为 [batch_size] 的 tensor
     """
     # 获取批次大小
     batch_size = len(batch)
@@ -201,21 +215,28 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     # 初始化批次张量
     embeddings = torch.zeros((batch_size, seq_len, embed_dim))
     attention_masks = torch.zeros((batch_size, seq_len), dtype=torch.long)
-    token_ids = torch.zeros((batch_size, seq_len), dtype=torch.long)
-    sequence_ids = torch.zeros(batch_size, dtype=torch.long)
+    input_ids = torch.zeros((batch_size, seq_len), dtype=torch.long)
+    ring_info = torch.zeros(batch_size, dtype=torch.long)
     
     # 填充批次张量
     for i, item in enumerate(batch):
         embeddings[i] = item['embeddings']
         attention_masks[i] = item['attention_mask']
-        token_ids[i] = item['token_ids']
-        sequence_ids[i] = item['sequence_id']
+        input_ids[i] = item['input_ids']
+        ring_info[i] = item['ring_info']
+    
+    # 打印调试信息
+    print(f"Debug - Collated shapes:")
+    print(f"embeddings shape: {embeddings.shape}")
+    print(f"attention_masks shape: {attention_masks.shape}")
+    print(f"input_ids shape: {input_ids.shape}")
+    print(f"ring_info shape: {ring_info.shape}")
     
     return {
         'embeddings': embeddings,
         'attention_mask': attention_masks,
-        'token_ids': token_ids,
-        'sequence_ids': sequence_ids
+        'input_ids': input_ids,
+        'ring_info': ring_info
     }
 
 # --- VAE 数据准备主函数 ---
