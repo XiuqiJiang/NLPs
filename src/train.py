@@ -61,12 +61,14 @@ def vae_token_loss(
     input_ids: torch.Tensor,
     mean: torch.Tensor,
     logvar: torch.Tensor,
+    ring_pred: torch.Tensor,
+    ring_info: torch.Tensor,
     epoch: int,
     pad_token_id: int = 1,
     max_beta: float = MAX_BETA,  # 使用配置文件中的值
     annealing_epochs: int = ANNEALING_EPOCHS,  # 使用配置文件中的值
     kld_target: float = KLD_TARGET  # 使用配置文件中的值
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """计算VAE的损失，使用Free Bits策略
     
     Args:
@@ -74,6 +76,8 @@ def vae_token_loss(
         input_ids: 输入的token IDs
         mean: 隐变量的均值
         logvar: 隐变量的对数方差
+        ring_pred: 预测的环数
+        ring_info: 环数信息
         epoch: 当前epoch
         pad_token_id: padding token的ID
         max_beta: KL散度的最大权重
@@ -81,7 +85,7 @@ def vae_token_loss(
         kld_target: 目标KLD下限K，单位是nats
         
     Returns:
-        (总损失, 重建损失, KL损失)
+        (总损失, 重建损失, KL损失, 环数损失)
     """
     # 计算当前epoch的beta值，使用传入的参数
     beta = get_beta(epoch, max_beta=max_beta, annealing_epochs=annealing_epochs)
@@ -102,167 +106,18 @@ def vae_token_loss(
     # 总损失
     loss = recon_loss + beta * free_bits_kl_loss
     
-    return loss, recon_loss, kl_loss  # 返回原始kl_loss用于监控
+    # 计算环数损失
+    ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info)
+    
+    return loss, recon_loss, kl_loss, ring_loss
 
 def train_epoch(
-    model: ESMVAEToken,
-    dataloader: DataLoader,
-    optimizer: torch.optim.Optimizer,
-    device: str,
-    epoch: int,
-    logger: logging.Logger,
-    max_beta: float = MAX_BETA,  # 使用配置文件中的值
-    annealing_epochs: int = ANNEALING_EPOCHS,  # 使用配置文件中的值
-    kld_target: float = KLD_TARGET  # 使用配置文件中的值
-) -> tuple[float, float, float]:
-    """训练一个epoch
-    
-    Args:
-        model: VAE模型
-        dataloader: 数据加载器
-        optimizer: 优化器
-        device: 设备
-        epoch: 当前epoch
-        logger: 日志记录器
-        max_beta: KL散度的最大权重
-        annealing_epochs: beta退火的周期数
-        kld_target: 目标KLD下限K，单位是nats
-        
-    Returns:
-        (平均总损失, 平均重建损失, 平均KL损失)
-    """
-    model.train()
-    total_loss = 0.0
-    total_recon_loss = 0.0
-    total_kl_loss = 0.0
-    
-    # 添加log_var的统计信息
-    log_var_mean = 0
-    log_var_std = 0
-    log_var_min = float('inf')
-    log_var_max = float('-inf')
-    
-    for batch_idx, batch in enumerate(dataloader):
-        # 将数据移到设备
-        batch = {k: v.to(device) for k, v in batch.items()}
-        
-        # 前向传播
-        recon_logits, mean, logvar = model(
-            batch['embeddings'],
-            batch['attention_mask'],
-            batch['input_ids']  # 传入target_ids用于teacher forcing
-        )
-        
-        # 计算损失，传入所有参数
-        loss, recon_loss, kl_loss = vae_token_loss(
-            recon_logits,
-            batch['input_ids'],
-            mean,
-            logvar,
-            epoch,
-            model.pad_token_id,
-            max_beta=max_beta,
-            annealing_epochs=annealing_epochs,
-            kld_target=kld_target
-        )
-        
-        # 反向传播
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        # 累加损失
-        total_loss += loss.item()
-        total_recon_loss += recon_loss.item()
-        total_kl_loss += kl_loss.item()
-        
-        # 更新log_var统计信息
-        log_var_mean += logvar.mean().item()
-        log_var_std += logvar.std().item()
-        log_var_min = min(log_var_min, logvar.min().item())
-        log_var_max = max(log_var_max, logvar.max().item())
-        
-        # 记录进度
-        if batch_idx % 10 == 0:
-            logger.info(
-                f"Batch {batch_idx}/{len(dataloader)} - "
-                f"Loss: {loss.item():.4f} - "
-                f"Recon Loss: {recon_loss.item():.4f} - "
-                f"KL Loss: {kl_loss.item():.4f} - "
-                f"Beta: {beta:.4f} - "
-                f"KLD Target: {kld_target:.4f}"
-            )
-    
-    # 计算平均损失
-    avg_loss = total_loss / len(dataloader)
-    avg_recon_loss = total_recon_loss / len(dataloader)
-    avg_kl_loss = total_kl_loss / len(dataloader)
-    
-    return avg_loss, avg_recon_loss, avg_kl_loss
-
-def setup_logging(log_dir: str) -> None:
-    """设置日志
-    
-    Args:
-        log_dir: 日志目录
-    """
-    log_dir = Path(log_dir)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_dir / 'train.log'),
-            logging.StreamHandler()
-        ]
-    )
-
-def compute_loss(
-    model: ESMVAEToken,
-    x: torch.Tensor,
-    input_ids: torch.Tensor,
-    attention_mask: torch.Tensor,
-    kl_weight: float = 1.0
-) -> Dict[str, torch.Tensor]:
-    """计算损失
-    
-    Args:
-        model: VAE模型
-        x: 输入序列嵌入 [batch_size, seq_len, embed_dim]
-        input_ids: 输入序列的token IDs [batch_size, seq_len]
-        attention_mask: 注意力掩码 [batch_size, seq_len]
-        kl_weight: KL散度权重
-        
-    Returns:
-        包含各项损失的字典
-    """
-    # 前向传播
-    recon_logits, mu, logvar = model(x, attention_mask, input_ids)
-    
-    # 重构损失
-    recon_loss = nn.CrossEntropyLoss(reduction='none')(recon_logits.view(-1, recon_logits.size(-1)), input_ids.view(-1))
-    recon_loss = (recon_loss * attention_mask.view(-1)).sum() / attention_mask.sum()
-    
-    # KL散度
-    kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
-    
-    # 总损失
-    total_loss = recon_loss + kl_weight * kl_loss
-    
-    return {
-        'total_loss': total_loss,
-        'recon_loss': recon_loss,
-        'kl_loss': kl_loss,
-        'log_var': logvar
-    }
-
-def train_epoch_new(
-    model: ESMVAEToken,
+    model: nn.Module,
     train_loader: DataLoader,
-    optimizer: optim.Optimizer,
+    optimizer: torch.optim.Optimizer,
+    epoch: int,
     device: torch.device,
-    kl_weight: float
+    pad_token_id: int
 ) -> Dict[str, float]:
     """训练一个epoch
     
@@ -270,84 +125,74 @@ def train_epoch_new(
         model: VAE模型
         train_loader: 训练数据加载器
         optimizer: 优化器
+        epoch: 当前epoch
         device: 设备
-        kl_weight: KL散度权重
+        pad_token_id: padding token的ID
         
     Returns:
-        包含各项损失的字典
+        损失字典
     """
     model.train()
     total_loss = 0
     total_recon_loss = 0
-    total_kl_loss = 0
+    total_kld_loss = 0
+    total_ring_loss = 0
     
-    # 添加log_var的统计信息
-    log_var_mean = 0
-    log_var_std = 0
-    log_var_min = float('inf')
-    log_var_max = float('-inf')
-    
-    pbar = tqdm(train_loader, desc='Training')
-    for batch_idx, batch in enumerate(pbar):
-        # 将数据移到设备
-        x = batch['embeddings'].to(device)  # [batch_size, seq_len, embed_dim]
-        attention_mask = batch['attention_mask'].to(device)  # [batch_size, seq_len]
-        input_ids = batch['input_ids'].to(device)  # [batch_size, seq_len]
+    for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
+        # 获取数据
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        ring_info = batch['ring_info'].to(device)
         
-        # 打印第一个batch的调试信息
-        if batch_idx == 0:
-            print(f"Debug - Batch shapes:")
-            print(f"x shape: {x.shape}")
-            print(f"attention_mask shape: {attention_mask.shape}")
-            print(f"input_ids shape: {input_ids.shape}")
+        # 前向传播
+        optimizer.zero_grad()
+        logits, _, mu, logvar, ring_pred = model(
+            input_ids,
+            attention_mask=attention_mask,
+            target_ids=input_ids,
+            ring_info=ring_info
+        )
         
         # 计算损失
-        losses = compute_loss(model, x, input_ids, attention_mask, kl_weight)
+        loss, loss_dict = vae_token_loss(
+            logits,
+            input_ids,
+            mu,
+            logvar,
+            ring_pred,
+            ring_info,
+            epoch
+        )
         
         # 反向传播
-        optimizer.zero_grad()
-        losses['total_loss'].backward()
+        loss.backward()
         optimizer.step()
         
         # 更新统计信息
-        total_loss += losses['total_loss'].item()
-        total_recon_loss += losses['recon_loss'].item()
-        total_kl_loss += losses['kl_loss'].item()
-        
-        # 更新log_var统计信息
-        log_var_mean += losses['log_var'].mean().item()
-        log_var_std += losses['log_var'].std().item()
-        log_var_min = min(log_var_min, losses['log_var'].min().item())
-        log_var_max = max(log_var_max, losses['log_var'].max().item())
-        
-        # 更新进度条
-        pbar.set_postfix({
-            'loss': f"{losses['total_loss'].item():.4f}",
-            'recon': f"{losses['recon_loss'].item():.4f}",
-            'kl': f"{losses['kl_loss'].item():.4f}",
-            'log_var_mean': f"{losses['log_var'].mean().item():.4f}"
-        })
+        total_loss += loss_dict['total_loss']
+        total_recon_loss += loss_dict['recon_loss']
+        total_kld_loss += loss_dict['kld_loss']
+        total_ring_loss += loss_dict['ring_loss']
     
     # 计算平均损失
     num_batches = len(train_loader)
+    avg_loss = total_loss / num_batches
+    avg_recon_loss = total_recon_loss / num_batches
+    avg_kld_loss = total_kld_loss / num_batches
+    avg_ring_loss = total_ring_loss / num_batches
+    
     return {
-        'loss': total_loss / num_batches,
-        'recon_loss': total_recon_loss / num_batches,
-        'kl_loss': total_kl_loss / num_batches,
-        'log_var_stats': {
-            'mean': log_var_mean / num_batches,
-            'std': log_var_std / num_batches,
-            'min': log_var_min,
-            'max': log_var_max
-        }
+        'loss': avg_loss,
+        'recon_loss': avg_recon_loss,
+        'kld_loss': avg_kld_loss,
+        'ring_loss': avg_ring_loss
     }
 
-@torch.no_grad()
 def validate(
-    model: ESMVAEToken,
+    model: nn.Module,
     val_loader: DataLoader,
     device: torch.device,
-    kl_weight: float
+    pad_token_id: int
 ) -> Dict[str, float]:
     """验证模型
     
@@ -355,61 +200,61 @@ def validate(
         model: VAE模型
         val_loader: 验证数据加载器
         device: 设备
-        kl_weight: KL散度权重
+        pad_token_id: padding token的ID
         
     Returns:
-        包含各项损失的字典
+        损失字典
     """
     model.eval()
     total_loss = 0
     total_recon_loss = 0
-    total_kl_loss = 0
+    total_kld_loss = 0
+    total_ring_loss = 0
     
-    # 添加log_var的统计信息
-    log_var_mean = 0
-    log_var_std = 0
-    log_var_min = float('inf')
-    log_var_max = float('-inf')
-    
-    for batch_idx, batch in enumerate(tqdm(val_loader, desc='Validation')):
-        # 将数据移到设备
-        x = batch['embeddings'].to(device)  # [batch_size, seq_len, embed_dim]
-        attention_mask = batch['attention_mask'].to(device)  # [batch_size, seq_len]
-        input_ids = batch['input_ids'].to(device)  # [batch_size, seq_len]
-        
-        # 打印第一个batch的调试信息
-        if batch_idx == 0:
-            print(f"Debug - Validation Batch shapes:")
-            print(f"x shape: {x.shape}")
-            print(f"attention_mask shape: {attention_mask.shape}")
-            print(f"input_ids shape: {input_ids.shape}")
-        
-        # 计算损失
-        losses = compute_loss(model, x, input_ids, attention_mask, kl_weight)
-        
-        # 更新统计信息
-        total_loss += losses['total_loss'].item()
-        total_recon_loss += losses['recon_loss'].item()
-        total_kl_loss += losses['kl_loss'].item()
-        
-        # 更新log_var统计信息
-        log_var_mean += losses['log_var'].mean().item()
-        log_var_std += losses['log_var'].std().item()
-        log_var_min = min(log_var_min, losses['log_var'].min().item())
-        log_var_max = max(log_var_max, losses['log_var'].max().item())
+    with torch.no_grad():
+        for batch in tqdm(val_loader, desc="Validation"):
+            # 获取数据
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            ring_info = batch['ring_info'].to(device)
+            
+            # 前向传播
+            logits, _, mu, logvar, ring_pred = model(
+                input_ids,
+                attention_mask=attention_mask,
+                target_ids=input_ids,
+                ring_info=ring_info
+            )
+            
+            # 计算损失
+            loss, loss_dict = vae_token_loss(
+                logits,
+                input_ids,
+                mu,
+                logvar,
+                ring_pred,
+                ring_info,
+                epoch=0  # 验证时不需要beta退火
+            )
+            
+            # 更新统计信息
+            total_loss += loss_dict['total_loss']
+            total_recon_loss += loss_dict['recon_loss']
+            total_kld_loss += loss_dict['kld_loss']
+            total_ring_loss += loss_dict['ring_loss']
     
     # 计算平均损失
     num_batches = len(val_loader)
+    avg_loss = total_loss / num_batches
+    avg_recon_loss = total_recon_loss / num_batches
+    avg_kld_loss = total_kld_loss / num_batches
+    avg_ring_loss = total_ring_loss / num_batches
+    
     return {
-        'loss': total_loss / num_batches,
-        'recon_loss': total_recon_loss / num_batches,
-        'kl_loss': total_kl_loss / num_batches,
-        'log_var_stats': {
-            'mean': log_var_mean / num_batches,
-            'std': log_var_std / num_batches,
-            'min': log_var_min,
-            'max': log_var_max
-        }
+        'loss': avg_loss,
+        'recon_loss': avg_recon_loss,
+        'kld_loss': avg_kld_loss,
+        'ring_loss': avg_ring_loss
     }
 
 def save_checkpoint(
@@ -548,10 +393,10 @@ def main(args=None):
     # 初始化损失历史
     train_loss_history = []
     train_recon_history = []
-    train_kl_history = []
+    train_kld_history = []
     val_loss_history = []
     val_recon_history = []
-    val_kl_history = []
+    val_kld_history = []
     
     # 训练循环
     best_val_loss = float('inf')
@@ -559,12 +404,13 @@ def main(args=None):
         logging.info(f"Epoch {epoch + 1}/{args.epochs}")
         
         # 训练
-        train_losses = train_epoch_new(
+        train_losses = train_epoch(
             model=model,
             train_loader=train_loader,
             optimizer=optimizer,
+            epoch=epoch,
             device=device,
-            kl_weight=args.kl_weight
+            pad_token_id=pad_token_id
         )
         
         # 验证
@@ -572,39 +418,33 @@ def main(args=None):
             model=model,
             val_loader=val_loader,
             device=device,
-            kl_weight=args.kl_weight
+            pad_token_id=pad_token_id
         )
         
         # 记录损失历史
         train_loss_history.append(train_losses['loss'])
         train_recon_history.append(train_losses['recon_loss'])
-        train_kl_history.append(train_losses['kl_loss'])
+        train_kld_history.append(train_losses['kld_loss'])
         val_loss_history.append(val_losses['loss'])
         val_recon_history.append(val_losses['recon_loss'])
-        val_kl_history.append(val_losses['kl_loss'])
+        val_kld_history.append(val_losses['kld_loss'])
         
         # 打印损失
-        print(f"[Epoch {epoch+1}] train_loss={train_losses['loss']:.4f}, train_recon={train_losses['recon_loss']:.4f}, train_kl={train_losses['kl_loss']:.4f}")
-        print(f"[Epoch {epoch+1}] val_loss={val_losses['loss']:.4f}, val_recon={val_losses['recon_loss']:.4f}, val_kl={val_losses['kl_loss']:.4f}")
+        print(f"[Epoch {epoch+1}] train_loss={train_losses['loss']:.4f}, train_recon={train_losses['recon_loss']:.4f}, train_kld={train_losses['kld_loss']:.4f}")
+        print(f"[Epoch {epoch+1}] val_loss={val_losses['loss']:.4f}, val_recon={val_losses['recon_loss']:.4f}, val_kld={val_losses['kld_loss']:.4f}")
         
         # 记录损失和log_var统计信息
         logging.info(
             f"Train - Loss: {train_losses['loss']:.4f}, "
             f"Recon: {train_losses['recon_loss']:.4f}, "
-            f"KL: {train_losses['kl_loss']:.4f}\n"
-            f"Train log_var - Mean: {train_losses['log_var_stats']['mean']:.4f}, "
-            f"Std: {train_losses['log_var_stats']['std']:.4f}, "
-            f"Min: {train_losses['log_var_stats']['min']:.4f}, "
-            f"Max: {train_losses['log_var_stats']['max']:.4f}"
+            f"KLD: {train_losses['kld_loss']:.4f}\n"
+            f"Train ring_loss: {train_losses['ring_loss']:.4f}"
         )
         logging.info(
             f"Val - Loss: {val_losses['loss']:.4f}, "
             f"Recon: {val_losses['recon_loss']:.4f}, "
-            f"KL: {val_losses['kl_loss']:.4f}\n"
-            f"Val log_var - Mean: {val_losses['log_var_stats']['mean']:.4f}, "
-            f"Std: {val_losses['log_var_stats']['std']:.4f}, "
-            f"Min: {val_losses['log_var_stats']['min']:.4f}, "
-            f"Max: {val_losses['log_var_stats']['max']:.4f}"
+            f"KLD: {val_losses['kld_loss']:.4f}\n"
+            f"Val ring_loss: {val_losses['ring_loss']:.4f}"
         )
         
         # 保存最佳模型
@@ -620,15 +460,15 @@ def main(args=None):
             )
             
         # 检查潜在空间是否被过度压缩
-        if train_losses['log_var_stats']['mean'] < -10:  # 如果log_var均值过小
+        if train_losses['recon_loss'] < 0.1:  # 如果recon_loss过小
             logging.warning(
                 f"警告：潜在空间可能被过度压缩！"
-                f"log_var均值 ({train_losses['log_var_stats']['mean']:.4f}) 过小"
+                f"recon_loss ({train_losses['recon_loss']:.4f}) 过小"
             )
-        if train_losses['log_var_stats']['std'] < 0.1:  # 如果log_var标准差过小
+        if train_losses['kld_loss'] < 0.1:  # 如果kld_loss过小
             logging.warning(
                 f"警告：潜在空间可能缺乏多样性！"
-                f"log_var标准差 ({train_losses['log_var_stats']['std']:.4f}) 过小"
+                f"kld_loss ({train_losses['kld_loss']:.4f}) 过小"
             )
     
     # 绘制损失曲线
@@ -638,8 +478,8 @@ def main(args=None):
     plt.plot(epochs, val_loss_history, label='Val Loss')
     plt.plot(epochs, train_recon_history, label='Train Recon Loss', linestyle='--')
     plt.plot(epochs, val_recon_history, label='Val Recon Loss', linestyle='--')
-    plt.plot(epochs, train_kl_history, label='Train KL Loss', linestyle=':')
-    plt.plot(epochs, val_kl_history, label='Val KL Loss', linestyle=':')
+    plt.plot(epochs, train_kld_history, label='Train KLD Loss', linestyle=':')
+    plt.plot(epochs, val_kld_history, label='Val KLD Loss', linestyle=':')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('训练与验证损失曲线')

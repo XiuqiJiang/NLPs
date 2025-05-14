@@ -79,13 +79,6 @@ class ProteinDataset(Dataset):
         attention_mask = encoding['attention_mask'].squeeze(0)  # [seq_len]
         input_ids = encoding['input_ids'].squeeze(0)  # [seq_len]
         
-        # 打印调试信息
-        if idx == 0:  # 只打印第一个样本的信息
-            print(f"Debug - Sequence: {sequence}")
-            print(f"Debug - Input IDs shape: {input_ids.shape}")
-            print(f"Debug - Attention mask shape: {attention_mask.shape}")
-            print(f"Debug - Embedding shape: {embedding.shape}")
-        
         return {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
