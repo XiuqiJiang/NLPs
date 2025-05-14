@@ -39,14 +39,14 @@ MAX_SEQUENCE_LENGTH = 64
 
 # 训练配置
 BATCH_SIZE = 32
-NUM_EPOCHS = 1000
+NUM_EPOCHS = 200  # 修改为200轮
 LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
 # VAE训练参数
 MAX_BETA = 0.01  # KL散度的最大权重
-ANNEALING_EPOCHS = 1000  # 修改为1000个epoch
-KLD_TARGET = 0.0  # Free Bits策略中的目标KLD下限K，单位是nats
+ANNEALING_EPOCHS = 200  # 修改为200个epoch
+KLD_TARGET = 0.0
 
 def get_beta(epoch: int, max_beta: float = 0.1) -> float:
     """计算当前epoch的beta值
@@ -58,8 +58,8 @@ def get_beta(epoch: int, max_beta: float = 0.1) -> float:
     Returns:
         beta值，范围从0到max_beta
     """
-    warmup_epochs = 200  # 修改预热期epoch数
-    annealing_epochs_after_warmup = 800  # 修改预热后达到max_beta所需的epoch数
+    warmup_epochs = 50  # 修改预热期epoch数
+    annealing_epochs_after_warmup = 150  # 修改预热后达到max_beta所需的epoch数
     
     if epoch < warmup_epochs:
         return 0.0
