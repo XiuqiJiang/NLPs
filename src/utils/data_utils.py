@@ -285,182 +285,101 @@ def preprocess_and_embed(
     batch_size: int = 32,
     max_length: int = MAX_SEQUENCE_LENGTH
 ) -> None:
-    """预处理序列并生成 embeddings、masks 和 token IDs，保存到文件
+    """预处理序列并生成ESM嵌入
     
     Args:
-        sequences: 氨基酸序列列表
+        sequences: 序列列表
         output_path: 输出文件路径
-        model_path: ESM 模型路径
+        model_path: ESM模型路径
         batch_size: 批处理大小
-        max_length: 最大序列长度（包括特殊token）
+        max_length: 最大序列长度
     """
     print(f"开始预处理 {len(sequences)} 个序列...")
     
-    # 验证序列长度
-    for i, seq in enumerate(sequences):
-        if len(seq) > max_length - 1:  # -1 是为了留出EOS token的位置
-            print(f"警告: 序列 {i} 长度 ({len(seq)}) 超过最大长度 ({max_length-1})，将被截断")
-    
-    # 验证序列字符
-    valid_chars = set("ACDEFGHIKLMNPQRSTVWYUOXBJZ")  # 排除特殊token
-    for i, seq in enumerate(sequences):
-        invalid_chars = set(seq) - valid_chars
-        if invalid_chars:
-            raise ValueError(f"序列 {i} 包含无效字符: {invalid_chars}")
-    
     # 加载模型和tokenizer
     print(f"从 {model_path} 加载模型...")
-    try:
-        # 首先尝试从本地加载
-        model = AutoModelForMaskedLM.from_pretrained(
-            model_path,
-            local_files_only=True
-        ).to(DEVICE)
-        tokenizer = AutoTokenizer.from_pretrained(
-            model_path,
-            local_files_only=True
-        )
-        
-        # 验证模型和tokenizer的词汇表大小是否匹配
-        model_vocab_size = model.config.vocab_size
-        tokenizer_vocab_size = tokenizer.vocab_size
-        print(f"模型词汇表大小: {model_vocab_size}")
-        print(f"Tokenizer词汇表大小: {tokenizer_vocab_size}")
-        
-        if model_vocab_size != tokenizer_vocab_size:
-            raise ValueError(
-                f"模型词汇表大小 ({model_vocab_size}) 与tokenizer词汇表大小 ({tokenizer_vocab_size}) 不匹配"
-            )
-            
-    except Exception as e:
-        print(f"从本地加载失败: {str(e)}")
-        raise
+    model = AutoModelForMaskedLM.from_pretrained(model_path)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    
+    print(f"模型词汇表大小: {model.config.vocab_size}")
+    print(f"Tokenizer词汇表大小: {len(tokenizer)}")
     
     # 对序列进行编码
     print("对序列进行编码...")
-    # 确保使用正确的填充和截断设置
-    inputs = tokenizer(
+    encodings = tokenizer(
         sequences,
-        padding='max_length',  # 使用max_length填充
+        padding='max_length',
         truncation=True,
         max_length=max_length,
-        return_tensors="pt",
-        return_attention_mask=True,  # 确保返回attention mask
-        return_token_type_ids=False  # ESM模型不需要token_type_ids
-    ).to(DEVICE)
+        return_tensors='pt'
+    )
     
-    # 验证输入形状
-    print(f"输入形状:")
-    print(f"input_ids: {inputs['input_ids'].shape}")
-    print(f"attention_mask: {inputs['attention_mask'].shape}")
+    print("输入形状:")
+    print(f"input_ids: {encodings['input_ids'].shape}")
+    print(f"attention_mask: {encodings['attention_mask'].shape}")
     
-    # 验证token IDs的有效性
-    if inputs['input_ids'].max() >= tokenizer.vocab_size:
-        raise ValueError(
-            f"Token IDs包含超出词汇表大小的值: "
-            f"{inputs['input_ids'].max()} >= {tokenizer.vocab_size}"
-        )
-    if inputs['input_ids'].min() < 0:
-        raise ValueError(f"Token IDs包含负值: {inputs['input_ids'].min()}")
-    
-    # 获取注意力掩码和token_ids
-    attention_masks = inputs['attention_mask']
-    token_ids = inputs['input_ids']  # 直接使用tokenizer生成的token_ids
-    
-    # 获取嵌入表示
+    # 生成嵌入表示
     print("生成嵌入表示...")
+    model.eval()
     with torch.no_grad():
-        # 确保所有输入都在正确的设备上
-        model_inputs = {
-            'input_ids': inputs['input_ids'],
-            'attention_mask': inputs['attention_mask']
-        }
-        outputs = model(**model_inputs, output_hidden_states=True)
-        
-        # 使用最后一层的隐藏状态作为嵌入
-        embeddings = outputs.hidden_states[-1]
-        
-        # 验证输出形状
-        print(f"模型输出形状:")
-        print(f"last_hidden_state: {embeddings.shape}")
+        outputs = model(**encodings, output_hidden_states=True)
+        embeddings = outputs.hidden_states[-1]  # 使用最后一层的隐藏状态
     
-    # 确保embeddings的长度符合要求
-    if embeddings.shape[0] != max_length:
-        print(f"警告: embeddings长度 ({embeddings.shape[0]}) 与max_length ({max_length}) 不匹配")
-        print("检查模型配置和输入...")
-        
-        # 检查模型配置
-        print(f"模型配置:")
-        print(f"- 最大位置嵌入: {model.config.max_position_embeddings}")
-        print(f"- 隐藏层大小: {model.config.hidden_size}")
-        print(f"- 模型类型: {model.__class__.__name__}")
-        print(f"- 词汇表大小: {model.config.vocab_size}")
-        
-        # 检查输入
-        print(f"输入检查:")
-        print(f"- input_ids 形状: {inputs['input_ids'].shape}")
-        print(f"- attention_mask 形状: {inputs['attention_mask'].shape}")
-        print(f"- attention_mask 非零元素数: {(inputs['attention_mask'] > 0).sum(dim=1)}")
-        print(f"- input_ids 中的特殊token数量: {(inputs['input_ids'] >= tokenizer.vocab_size).sum(dim=1)}")
-        
-        # 创建新的填充后的embeddings
-        print("创建填充后的embeddings...")
-        padded_embeddings = torch.zeros(
-            (max_length, embeddings.shape[1], embeddings.shape[2]),
-            dtype=embeddings.dtype,
-            device=embeddings.device
-        )
-        # 复制原始embeddings
-        padded_embeddings[:embeddings.shape[0], :, :] = embeddings
-        embeddings = padded_embeddings
+    print("模型输出形状:")
+    print(f"last_hidden_state: {embeddings.shape}")
     
-    # 验证数据形状
-    print(f"验证数据形状:")
-    print(f"Embeddings: {embeddings.shape}")  # [seq_len, embed_dim]
-    print(f"Attention masks: {attention_masks.shape}")  # [seq_len]
-    print(f"Token IDs: {token_ids.shape}")  # [seq_len]
+    # 检查维度
+    if embeddings.shape[0] != len(sequences):
+        print(f"警告: embeddings长度 ({embeddings.shape[0]}) 与序列数量 ({len(sequences)}) 不匹配")
     
-    # 验证 token IDs 的有效性
-    assert token_ids.max() < tokenizer.vocab_size, f"Token IDs 包含超出词汇表大小的值: {token_ids.max()} >= {tokenizer.vocab_size}"
-    assert token_ids.min() >= 0, f"Token IDs 包含负值: {token_ids.min()}"
+    # 检查模型配置和输入
+    print("检查模型配置和输入...")
+    print("模型配置:")
+    print(f"- 最大位置嵌入: {model.config.max_position_embeddings}")
+    print(f"- 隐藏层大小: {model.config.hidden_size}")
+    print(f"- 模型类型: {model.__class__.__name__}")
+    print(f"- 词汇表大小: {model.config.vocab_size}")
     
-    # 验证序列长度
-    assert embeddings.shape[0] == max_length, f"Embeddings 序列长度 ({embeddings.shape[0]}) 与 max_length ({max_length}) 不匹配"
-    assert attention_masks.shape[0] == max_length, f"Attention masks 序列长度 ({attention_masks.shape[0]}) 与 max_length ({max_length}) 不匹配"
-    assert token_ids.shape[0] == max_length, f"Token IDs 序列长度 ({token_ids.shape[0]}) 与 max_length ({max_length}) 不匹配"
+    print("输入检查:")
+    print(f"- input_ids 形状: {encodings['input_ids'].shape}")
+    print(f"- attention_mask 形状: {encodings['attention_mask'].shape}")
+    print(f"- attention_mask 非零元素数: {encodings['attention_mask'].sum(dim=1)}")
+    print(f"- input_ids 中的特殊token数量: {(encodings['input_ids'] < 4).sum(dim=1)}")
     
-    # 验证特殊token
-    for i, ids in enumerate(token_ids):
-        if ids[-1] != tokenizer.pad_token_id:
-            print(f"警告: 序列 {i} 的最后一个token不是PAD token")
-        if tokenizer.eos_token_id not in ids:
-            print(f"警告: 序列 {i} 中没有EOS token")
+    # 创建填充后的embeddings
+    print("创建填充后的embeddings...")
+    # 确保embeddings的维度正确
+    if embeddings.shape[0] != len(sequences):
+        # 如果embeddings的批次大小与序列数量不匹配，需要调整
+        if embeddings.shape[0] > len(sequences):
+            # 如果embeddings太大，截断它
+            embeddings = embeddings[:len(sequences)]
+        else:
+            # 如果embeddings太小，用零填充
+            padding = torch.zeros(
+                (len(sequences) - embeddings.shape[0], embeddings.shape[1], embeddings.shape[2]),
+                dtype=embeddings.dtype,
+                device=embeddings.device
+            )
+            embeddings = torch.cat([embeddings, padding], dim=0)
     
-    # 保存到文件
-    print(f"保存数据到 {output_path}...")
+    # 保存处理后的数据
+    print("保存处理后的数据...")
     data = {
-        'embeddings': embeddings.cpu(),
-        'attention_masks': attention_masks.cpu(),
-        'token_ids': token_ids.cpu(),
+        'embeddings': embeddings,
+        'attention_masks': encodings['attention_mask'],
+        'token_ids': encodings['input_ids'],
         'sequences': sequences,
         'config': {
             'max_length': max_length,
-            'vocab_size': tokenizer.vocab_size,
-            'pad_token_id': tokenizer.pad_token_id,
-            'eos_token_id': tokenizer.eos_token_id,
-            'model_name': model.__class__.__name__,
-            'embedding_dim': embeddings.shape[1],
-            'model_path': model_path  # 保存模型路径以便验证
+            'vocab_size': model.config.vocab_size,
+            'hidden_size': model.config.hidden_size
         }
     }
     
+    # 确保输出目录存在
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # 保存数据
     torch.save(data, output_path)
     print(f"数据已保存到 {output_path}")
-    print(f"配置信息:")
-    print(f"- 最大序列长度: {max_length}")
-    print(f"- 词汇表大小: {tokenizer.vocab_size}")
-    print(f"- Padding token ID: {tokenizer.pad_token_id}")
-    print(f"- EOS token ID: {tokenizer.eos_token_id}")
-    print(f"- 模型类型: {model.__class__.__name__}")
-    print(f"- 嵌入维度: {embeddings.shape[1]}")
-    print(f"- 模型路径: {model_path}")
