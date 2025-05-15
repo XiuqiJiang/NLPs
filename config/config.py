@@ -48,12 +48,13 @@ MAX_BETA = 0.01  # KL散度的最大权重
 ANNEALING_EPOCHS = 200  # 修改为200个epoch
 KLD_TARGET = 0.0
 
-def get_beta(epoch: int, max_beta: float = 0.1) -> float:
+def get_beta(epoch: int, max_beta: float = 0.1, annealing_epochs: int = ANNEALING_EPOCHS) -> float:
     """计算当前epoch的beta值
     
     Args:
         epoch: 当前epoch
         max_beta: 最大beta值
+        annealing_epochs: beta退火的周期数
         
     Returns:
         beta值，范围从0到max_beta

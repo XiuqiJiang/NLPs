@@ -63,7 +63,7 @@ class ProteinDataset(Dataset):
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         sequence = self.sequences[idx]
-        embedding = self.embeddings[idx]
+        embedding = self.embeddings[idx]  # [seq_len, embed_dim]
         ring_info = self.ring_info[idx]
         
         # 编码序列
@@ -79,10 +79,18 @@ class ProteinDataset(Dataset):
         attention_mask = encoding['attention_mask'].squeeze(0)  # [seq_len]
         input_ids = encoding['input_ids'].squeeze(0)  # [seq_len]
         
+        # 确保embedding的维度正确
+        if embedding.dim() == 2:  # [seq_len, embed_dim]
+            pass  # 保持原样
+        elif embedding.dim() == 3:  # [1, seq_len, embed_dim]
+            embedding = embedding.squeeze(0)  # 移除多余的维度
+        else:
+            raise ValueError(f"意外的embedding维度: {embedding.shape}")
+        
         return {
             'input_ids': input_ids,
             'attention_mask': attention_mask,
-            'embeddings': embedding,
+            'embeddings': embedding,  # [seq_len, embed_dim]
             'ring_info': ring_info
         }
 
@@ -186,47 +194,26 @@ def create_data_loaders(
     return train_loader, val_loader
 
 def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-    """将一批数据项组合成一个批次
-    
-    Args:
-        batch: 数据项列表
-        
-    Returns:
-        包含以下键的字典:
-        - 'embeddings': 形状为 [batch_size, seq_len, embed_dim] 的 tensor
-        - 'attention_mask': 形状为 [batch_size, seq_len] 的 tensor
-        - 'input_ids': 形状为 [batch_size, seq_len] 的 tensor
-        - 'ring_info': 形状为 [batch_size] 的 tensor
-    """
-    # 获取批次大小
-    batch_size = len(batch)
-    
     # 获取序列长度和嵌入维度
-    seq_len = batch[0]['embeddings'].shape[0]
+    seq_len = batch[0]['embeddings'].shape[0]  # 从[seq_len, embed_dim]中获取
     embed_dim = batch[0]['embeddings'].shape[1]
     
     # 初始化批次张量
+    batch_size = len(batch)
     embeddings = torch.zeros((batch_size, seq_len, embed_dim))
     attention_masks = torch.zeros((batch_size, seq_len), dtype=torch.long)
     input_ids = torch.zeros((batch_size, seq_len), dtype=torch.long)
-    ring_info = torch.zeros(batch_size, dtype=torch.long)
+    ring_info = torch.zeros((batch_size, seq_len), dtype=torch.long)
     
     # 填充批次张量
     for i, item in enumerate(batch):
-        embeddings[i] = item['embeddings']
+        embeddings[i] = item['embeddings']  # [seq_len, embed_dim]
         attention_masks[i] = item['attention_mask']
         input_ids[i] = item['input_ids']
         ring_info[i] = item['ring_info']
     
-    # 打印调试信息
-    print(f"Debug - Collated shapes:")
-    print(f"embeddings shape: {embeddings.shape}")
-    print(f"attention_masks shape: {attention_masks.shape}")
-    print(f"input_ids shape: {input_ids.shape}")
-    print(f"ring_info shape: {ring_info.shape}")
-    
     return {
-        'embeddings': embeddings,
+        'embeddings': embeddings,  # [batch_size, seq_len, embed_dim]
         'attention_mask': attention_masks,
         'input_ids': input_ids,
         'ring_info': ring_info
@@ -398,8 +385,8 @@ def preprocess_and_embed(
         print(f"last_hidden_state: {embeddings.shape}")
     
     # 确保embeddings的长度符合要求
-    if embeddings.shape[1] != max_length:
-        print(f"警告: embeddings长度 ({embeddings.shape[1]}) 与max_length ({max_length}) 不匹配")
+    if embeddings.shape[0] != max_length:
+        print(f"警告: embeddings长度 ({embeddings.shape[0]}) 与max_length ({max_length}) 不匹配")
         print("检查模型配置和输入...")
         
         # 检查模型配置
@@ -419,28 +406,28 @@ def preprocess_and_embed(
         # 创建新的填充后的embeddings
         print("创建填充后的embeddings...")
         padded_embeddings = torch.zeros(
-            (embeddings.shape[0], max_length, embeddings.shape[2]),
+            (max_length, embeddings.shape[1], embeddings.shape[2]),
             dtype=embeddings.dtype,
             device=embeddings.device
         )
         # 复制原始embeddings
-        padded_embeddings[:, :embeddings.shape[1], :] = embeddings
+        padded_embeddings[:embeddings.shape[0], :, :] = embeddings
         embeddings = padded_embeddings
     
     # 验证数据形状
     print(f"验证数据形状:")
-    print(f"Embeddings: {embeddings.shape}")  # [batch_size, seq_len, embed_dim]
-    print(f"Attention masks: {attention_masks.shape}")  # [batch_size, seq_len]
-    print(f"Token IDs: {token_ids.shape}")  # [batch_size, seq_len]
+    print(f"Embeddings: {embeddings.shape}")  # [seq_len, embed_dim]
+    print(f"Attention masks: {attention_masks.shape}")  # [seq_len]
+    print(f"Token IDs: {token_ids.shape}")  # [seq_len]
     
     # 验证 token IDs 的有效性
     assert token_ids.max() < tokenizer.vocab_size, f"Token IDs 包含超出词汇表大小的值: {token_ids.max()} >= {tokenizer.vocab_size}"
     assert token_ids.min() >= 0, f"Token IDs 包含负值: {token_ids.min()}"
     
     # 验证序列长度
-    assert embeddings.shape[1] == max_length, f"Embeddings 序列长度 ({embeddings.shape[1]}) 与 max_length ({max_length}) 不匹配"
-    assert attention_masks.shape[1] == max_length, f"Attention masks 序列长度 ({attention_masks.shape[1]}) 与 max_length ({max_length}) 不匹配"
-    assert token_ids.shape[1] == max_length, f"Token IDs 序列长度 ({token_ids.shape[1]}) 与 max_length ({max_length}) 不匹配"
+    assert embeddings.shape[0] == max_length, f"Embeddings 序列长度 ({embeddings.shape[0]}) 与 max_length ({max_length}) 不匹配"
+    assert attention_masks.shape[0] == max_length, f"Attention masks 序列长度 ({attention_masks.shape[0]}) 与 max_length ({max_length}) 不匹配"
+    assert token_ids.shape[0] == max_length, f"Token IDs 序列长度 ({token_ids.shape[0]}) 与 max_length ({max_length}) 不匹配"
     
     # 验证特殊token
     for i, ids in enumerate(token_ids):
@@ -462,7 +449,7 @@ def preprocess_and_embed(
             'pad_token_id': tokenizer.pad_token_id,
             'eos_token_id': tokenizer.eos_token_id,
             'model_name': model.__class__.__name__,
-            'embedding_dim': embeddings.shape[2],
+            'embedding_dim': embeddings.shape[1],
             'model_path': model_path  # 保存模型路径以便验证
         }
     }
@@ -475,5 +462,5 @@ def preprocess_and_embed(
     print(f"- Padding token ID: {tokenizer.pad_token_id}")
     print(f"- EOS token ID: {tokenizer.eos_token_id}")
     print(f"- 模型类型: {model.__class__.__name__}")
-    print(f"- 嵌入维度: {embeddings.shape[2]}")
+    print(f"- 嵌入维度: {embeddings.shape[1]}")
     print(f"- 模型路径: {model_path}")

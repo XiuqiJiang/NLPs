@@ -313,8 +313,11 @@ def vae_token_loss(
     logvar: torch.Tensor,
     ring_pred: torch.Tensor,
     ring_info: torch.Tensor,
-    epoch: int
-) -> Tuple[torch.Tensor, Dict[str, float]]:
+    epoch: int,
+    pad_token_id: int = 1,
+    max_beta: float = MAX_BETA,
+    annealing_epochs: int = ANNEALING_EPOCHS
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """计算VAE损失
     
     Args:
@@ -325,36 +328,87 @@ def vae_token_loss(
         ring_pred: 预测的环数，形状为 [batch_size, 1]
         ring_info: 真实的环数，形状为 [batch_size]
         epoch: 当前训练轮次
+        pad_token_id: padding token的ID，默认为1
+        max_beta: KL散度的最大权重
+        annealing_epochs: beta退火的周期数
         
     Returns:
-        (总损失, 损失字典)
+        (总损失, 重构损失, KL损失, 环数损失)
     """
+    # 确保所有张量都在同一个设备上
+    device = recon_logits.device
+    input_ids = input_ids.to(device)
+    mean = mean.to(device)
+    logvar = logvar.to(device)
+    ring_pred = ring_pred.to(device)
+    ring_info = ring_info.to(device)
+    
+    # 打印调试信息
+    print(f"Debug - recon_logits shape: {recon_logits.shape}")
+    print(f"Debug - input_ids shape: {input_ids.shape}")
+    print(f"Debug - mean shape: {mean.shape}")
+    print(f"Debug - logvar shape: {logvar.shape}")
+    print(f"Debug - ring_pred shape: {ring_pred.shape}")
+    print(f"Debug - ring_info shape: {ring_info.shape}")
+    
+    # 检查输入值的范围
+    print(f"Debug - input_ids min/max: {input_ids.min()}/{input_ids.max()}")
+    print(f"Debug - ring_info min/max: {ring_info.min()}/{ring_info.max()}")
+    print(f"Debug - vocab_size: {recon_logits.size(-1)}")
+    
     # 计算重构损失
-    recon_loss = F.cross_entropy(
-        recon_logits.view(-1, recon_logits.size(-1)),
-        input_ids.view(-1),
-        ignore_index=0  # 忽略padding token
-    )
+    try:
+        # 重塑张量
+        recon_logits_flat = recon_logits.view(-1, recon_logits.size(-1))
+        input_ids_flat = input_ids.view(-1)
+        
+        print(f"Debug - recon_logits_flat shape: {recon_logits_flat.shape}")
+        print(f"Debug - input_ids_flat shape: {input_ids_flat.shape}")
+        
+        # 使用交叉熵损失
+        recon_loss = F.cross_entropy(
+            recon_logits_flat,
+            input_ids_flat,
+            ignore_index=pad_token_id,
+            reduction='mean'
+        )
+        print(f"Debug - recon_loss computed: {recon_loss.item()}")
+    except Exception as e:
+        print(f"Error in recon_loss computation: {e}")
+        print(f"Debug - recon_logits_flat min/max: {recon_logits_flat.min()}/{recon_logits_flat.max()}")
+        print(f"Debug - input_ids_flat min/max: {input_ids_flat.min()}/{input_ids_flat.max()}")
+        raise
     
     # 计算KL散度
-    kld_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
+    try:
+        kld_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
+        print(f"Debug - kld_loss computed: {kld_loss.item()}")
+    except Exception as e:
+        print(f"Error in kld_loss computation: {e}")
+        print(f"Debug - mean min/max: {mean.min()}/{mean.max()}")
+        print(f"Debug - logvar min/max: {logvar.min()}/{logvar.max()}")
+        raise
     
     # 计算环数预测损失
-    ring_loss = F.mse_loss(ring_pred.squeeze(-1), ring_info.float())
+    try:
+        ring_loss = F.mse_loss(ring_pred.squeeze(-1), ring_info.float())
+        print(f"Debug - ring_loss computed: {ring_loss.item()}")
+    except Exception as e:
+        print(f"Error in ring_loss computation: {e}")
+        print(f"Debug - ring_pred min/max: {ring_pred.min()}/{ring_pred.max()}")
+        print(f"Debug - ring_info min/max: {ring_info.min()}/{ring_info.max()}")
+        raise
     
     # 获取beta值
-    beta = get_beta(epoch)
+    beta = get_beta(epoch, max_beta=max_beta, annealing_epochs=annealing_epochs)
+    print(f"Debug - beta value: {beta}")
     
     # 计算总损失
-    total_loss = recon_loss + beta * kld_loss + 0.1 * ring_loss
+    try:
+        total_loss = recon_loss + beta * kld_loss + 0.1 * ring_loss
+        print(f"Debug - total_loss computed: {total_loss.item()}")
+    except Exception as e:
+        print(f"Error in total_loss computation: {e}")
+        raise
     
-    # 返回损失字典
-    loss_dict = {
-        'total_loss': total_loss.item(),
-        'recon_loss': recon_loss.item(),
-        'kld_loss': kld_loss.item(),
-        'ring_loss': ring_loss.item(),
-        'beta': beta
-    }
-    
-    return total_loss, loss_dict 
+    return total_loss, recon_loss, kld_loss, ring_loss 

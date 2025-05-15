@@ -140,39 +140,66 @@ def train_epoch(
     
     for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
         # 获取数据
+        embeddings = batch['embeddings'].to(device)  # [batch_size, seq_len, embed_dim]
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         ring_info = batch['ring_info'].to(device)
         
+        # 打印调试信息
+        print(f"Debug - embeddings shape: {embeddings.shape}")
+        print(f"Debug - input_ids shape: {input_ids.shape}")
+        print(f"Debug - attention_mask shape: {attention_mask.shape}")
+        print(f"Debug - ring_info shape: {ring_info.shape}")
+        print(f"Debug - input_ids min/max: {input_ids.min()}/{input_ids.max()}")
+        print(f"Debug - ring_info min/max: {ring_info.min()}/{ring_info.max()}")
+        
         # 前向传播
         optimizer.zero_grad()
         logits, _, mu, logvar, ring_pred = model(
-            input_ids,
+            embeddings,  # 使用embeddings而不是input_ids
             attention_mask=attention_mask,
             target_ids=input_ids,
             ring_info=ring_info
         )
         
+        # 打印调试信息
+        print(f"Debug - logits shape: {logits.shape}")
+        print(f"Debug - mu shape: {mu.shape}")
+        print(f"Debug - logvar shape: {logvar.shape}")
+        print(f"Debug - ring_pred shape: {ring_pred.shape}")
+        
         # 计算损失
-        loss, loss_dict = vae_token_loss(
+        loss, recon_loss, kl_loss, ring_loss = vae_token_loss(
             logits,
             input_ids,
             mu,
             logvar,
             ring_pred,
             ring_info,
-            epoch
+            epoch,
+            pad_token_id=pad_token_id,  # 传递pad_token_id参数
+            max_beta=MAX_BETA,  # 传递max_beta参数
+            annealing_epochs=ANNEALING_EPOCHS  # 传递annealing_epochs参数
         )
+        
+        # 打印调试信息
+        print(f"Debug - loss: {loss.item()}")
+        print(f"Debug - recon_loss: {recon_loss.item()}")
+        print(f"Debug - kl_loss: {kl_loss.item()}")
+        print(f"Debug - ring_loss: {ring_loss.item()}")
         
         # 反向传播
         loss.backward()
         optimizer.step()
         
         # 更新统计信息
-        total_loss += loss_dict['total_loss']
-        total_recon_loss += loss_dict['recon_loss']
-        total_kld_loss += loss_dict['kld_loss']
-        total_ring_loss += loss_dict['ring_loss']
+        total_loss += loss.item()
+        total_recon_loss += recon_loss.item()
+        total_kld_loss += kl_loss.item()
+        total_ring_loss += ring_loss.item()
+        
+        # 只打印第一个batch的调试信息
+        break
     
     # 计算平均损失
     num_batches = len(train_loader)
@@ -214,20 +241,21 @@ def validate(
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
             # 获取数据
+            embeddings = batch['embeddings'].to(device)  # [batch_size, seq_len, embed_dim]
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             ring_info = batch['ring_info'].to(device)
             
             # 前向传播
             logits, _, mu, logvar, ring_pred = model(
-                input_ids,
+                embeddings,  # 使用embeddings而不是input_ids
                 attention_mask=attention_mask,
                 target_ids=input_ids,
                 ring_info=ring_info
             )
             
             # 计算损失
-            loss, loss_dict = vae_token_loss(
+            loss, recon_loss, kl_loss, ring_loss = vae_token_loss(
                 logits,
                 input_ids,
                 mu,
@@ -238,10 +266,10 @@ def validate(
             )
             
             # 更新统计信息
-            total_loss += loss_dict['total_loss']
-            total_recon_loss += loss_dict['recon_loss']
-            total_kld_loss += loss_dict['kld_loss']
-            total_ring_loss += loss_dict['ring_loss']
+            total_loss += loss.item()
+            total_recon_loss += recon_loss.item()
+            total_kld_loss += kl_loss.item()
+            total_ring_loss += ring_loss.item()
     
     # 计算平均损失
     num_batches = len(val_loader)
