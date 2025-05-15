@@ -62,9 +62,21 @@ class ProteinDataset(Dataset):
         return len(self.sequences)
     
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """获取单个数据项
+        
+        Args:
+            idx: 数据索引
+            
+        Returns:
+            包含以下键的字典:
+            - input_ids: token IDs [seq_len]
+            - attention_mask: 注意力掩码 [seq_len]
+            - embeddings: ESM嵌入 [seq_len, embed_dim]
+            - ring_info: 环数信息 [1]
+        """
         sequence = self.sequences[idx]
         embedding = self.embeddings[idx]  # [seq_len, embed_dim]
-        ring_info = self.ring_info[idx]
+        ring_info = self.ring_info[idx]  # 标量值
         
         # 编码序列
         encoding = self.tokenizer(
@@ -87,11 +99,15 @@ class ProteinDataset(Dataset):
         else:
             raise ValueError(f"意外的embedding维度: {embedding.shape}")
         
+        # 确保ring_info是标量
+        if ring_info.dim() > 0:
+            ring_info = ring_info.squeeze()
+        
         return {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
+            'input_ids': input_ids,  # [seq_len]
+            'attention_mask': attention_mask,  # [seq_len]
             'embeddings': embedding,  # [seq_len, embed_dim]
-            'ring_info': ring_info
+            'ring_info': ring_info  # 标量
         }
 
 # --- 数据加载函数 ---
@@ -194,6 +210,18 @@ def create_data_loaders(
     return train_loader, val_loader
 
 def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+    """将多个数据项组合成一个批次
+    
+    Args:
+        batch: 数据项列表，每个数据项是一个字典
+        
+    Returns:
+        包含以下键的字典:
+        - embeddings: ESM嵌入 [batch_size, seq_len, embed_dim]
+        - attention_mask: 注意力掩码 [batch_size, seq_len]
+        - input_ids: token IDs [batch_size, seq_len]
+        - ring_info: 环数信息 [batch_size]
+    """
     # 获取序列长度和嵌入维度
     seq_len = batch[0]['embeddings'].shape[0]  # 从[seq_len, embed_dim]中获取
     embed_dim = batch[0]['embeddings'].shape[1]
@@ -203,20 +231,20 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     embeddings = torch.zeros((batch_size, seq_len, embed_dim))
     attention_masks = torch.zeros((batch_size, seq_len), dtype=torch.long)
     input_ids = torch.zeros((batch_size, seq_len), dtype=torch.long)
-    ring_info = torch.zeros((batch_size, seq_len), dtype=torch.long)
+    ring_info = torch.zeros(batch_size, dtype=torch.long)  # 修改为[batch_size]
     
     # 填充批次张量
     for i, item in enumerate(batch):
         embeddings[i] = item['embeddings']  # [seq_len, embed_dim]
-        attention_masks[i] = item['attention_mask']
-        input_ids[i] = item['input_ids']
-        ring_info[i] = item['ring_info']
+        attention_masks[i] = item['attention_mask']  # [seq_len]
+        input_ids[i] = item['input_ids']  # [seq_len]
+        ring_info[i] = item['ring_info']  # 标量
     
     return {
         'embeddings': embeddings,  # [batch_size, seq_len, embed_dim]
-        'attention_mask': attention_masks,
-        'input_ids': input_ids,
-        'ring_info': ring_info
+        'attention_mask': attention_masks,  # [batch_size, seq_len]
+        'input_ids': input_ids,  # [batch_size, seq_len]
+        'ring_info': ring_info  # [batch_size]
     }
 
 # --- VAE 数据准备主函数 ---

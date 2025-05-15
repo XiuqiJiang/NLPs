@@ -117,7 +117,9 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     device: torch.device,
-    pad_token_id: int
+    pad_token_id: int,
+    max_beta: float = 1.0,
+    annealing_epochs: int = 10
 ) -> Dict[str, float]:
     """训练一个epoch
     
@@ -125,12 +127,14 @@ def train_epoch(
         model: VAE模型
         train_loader: 训练数据加载器
         optimizer: 优化器
-        epoch: 当前epoch
-        device: 设备
+        epoch: 当前训练轮次
+        device: 训练设备
         pad_token_id: padding token的ID
+        max_beta: KL散度的最大权重
+        annealing_epochs: beta值达到最大值的轮次数
         
     Returns:
-        损失字典
+        包含训练损失的字典
     """
     model.train()
     total_loss = 0
@@ -138,75 +142,44 @@ def train_epoch(
     total_kld_loss = 0
     total_ring_loss = 0
     
-    for batch in tqdm(train_loader, desc=f"Epoch {epoch}"):
-        # 获取数据
-        embeddings = batch['embeddings'].to(device)  # [batch_size, seq_len, embed_dim]
+    for batch_idx, batch in enumerate(train_loader):
+        # 将数据移到设备上
+        embeddings = batch['embeddings'].to(device)
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         ring_info = batch['ring_info'].to(device)
         
-        # 打印调试信息
-        print(f"Debug - embeddings shape: {embeddings.shape}")
-        print(f"Debug - input_ids shape: {input_ids.shape}")
-        print(f"Debug - attention_mask shape: {attention_mask.shape}")
-        print(f"Debug - ring_info shape: {ring_info.shape}")
-        print(f"Debug - input_ids min/max: {input_ids.min()}/{input_ids.max()}")
-        print(f"Debug - ring_info min/max: {ring_info.min()}/{ring_info.max()}")
-        
         # 前向传播
         optimizer.zero_grad()
-        logits, _, mu, logvar, ring_pred = model(
-            embeddings,  # 使用embeddings而不是input_ids
-            attention_mask=attention_mask,
-            target_ids=input_ids,
-            ring_info=ring_info
-        )
-        
-        # 打印调试信息
-        print(f"Debug - logits shape: {logits.shape}")
-        print(f"Debug - mu shape: {mu.shape}")
-        print(f"Debug - logvar shape: {logvar.shape}")
-        print(f"Debug - ring_pred shape: {ring_pred.shape}")
+        logits, mu, logvar, ring_pred = model(embeddings, attention_mask)
         
         # 计算损失
-        loss, recon_loss, kl_loss, ring_loss = vae_token_loss(
-            logits,
-            input_ids,
-            mu,
-            logvar,
-            ring_pred,
-            ring_info,
-            epoch,
-            pad_token_id=pad_token_id,  # 传递pad_token_id参数
-            max_beta=MAX_BETA,  # 传递max_beta参数
-            annealing_epochs=ANNEALING_EPOCHS  # 传递annealing_epochs参数
+        loss, recon_loss, kld_loss, ring_loss = vae_token_loss(
+            logits, input_ids, mu, logvar, ring_pred, ring_info,
+            epoch, pad_token_id, max_beta, annealing_epochs
         )
-        
-        # 打印调试信息
-        print(f"Debug - loss: {loss.item()}")
-        print(f"Debug - recon_loss: {recon_loss.item()}")
-        print(f"Debug - kl_loss: {kl_loss.item()}")
-        print(f"Debug - ring_loss: {ring_loss.item()}")
         
         # 反向传播
         loss.backward()
         optimizer.step()
         
-        # 更新统计信息
+        # 累加损失
         total_loss += loss.item()
         total_recon_loss += recon_loss.item()
-        total_kld_loss += kl_loss.item()
+        total_kld_loss += kld_loss.item()
         total_ring_loss += ring_loss.item()
         
-        # 只打印第一个batch的调试信息
-        break
+        # 打印进度
+        if batch_idx % 10 == 0:
+            print(f'Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} '
+                  f'({100. * batch_idx / len(train_loader):.0f}%)]\t'
+                  f'Loss: {loss.item():.6f}')
     
     # 计算平均损失
-    num_batches = len(train_loader)
-    avg_loss = total_loss / num_batches
-    avg_recon_loss = total_recon_loss / num_batches
-    avg_kld_loss = total_kld_loss / num_batches
-    avg_ring_loss = total_ring_loss / num_batches
+    avg_loss = total_loss / len(train_loader)
+    avg_recon_loss = total_recon_loss / len(train_loader)
+    avg_kld_loss = total_kld_loss / len(train_loader)
+    avg_ring_loss = total_ring_loss / len(train_loader)
     
     return {
         'loss': avg_loss,
