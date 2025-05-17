@@ -106,8 +106,14 @@ def vae_token_loss(
     # 总损失
     loss = recon_loss + beta * free_bits_kl_loss
     
-    # 计算环数损失
-    ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info)
+    # 计算环数损失（仅有条件时）
+    if ring_pred is not None and ring_info is not None:
+        ring_info = ring_info.long()
+        num_classes = ring_pred.shape[1] if ring_pred.dim() > 1 else 1
+        assert ring_info.min() >= 0 and ring_info.max() < num_classes, f"标签越界: {ring_info.min()} ~ {ring_info.max()}，类别数: {num_classes}"
+        ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info)
+    else:
+        ring_loss = torch.tensor(0.0, device=recon_logits.device)
     
     return loss, recon_loss, kl_loss, ring_loss
 
@@ -143,37 +149,68 @@ def train_epoch(
     total_ring_loss = 0
     
     for batch_idx, batch in enumerate(train_loader):
-        # 将数据移到设备上
         embeddings = batch['embeddings'].to(device)
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         ring_info = batch['ring_info'].to(device)
-        
-        # 前向传播
-        optimizer.zero_grad()
-        logits, mu, logvar, ring_pred = model(embeddings, attention_mask)
-        
-        # 计算损失
-        loss, recon_loss, kld_loss, ring_loss = vae_token_loss(
-            logits, input_ids, mu, logvar, ring_pred, ring_info,
-            epoch, pad_token_id, max_beta, annealing_epochs
-        )
-        
+        # 区分有条件和无条件样本
+        is_conditional = (ring_info >= 2) & (ring_info <= 5)
+        # 有条件样本（2~5环，映射为0~3）
+        cond_loss = cond_recon = cond_kld = cond_ring = 0.0
+        if is_conditional.any():
+            cond_embeddings = embeddings[is_conditional]
+            cond_input_ids = input_ids[is_conditional]
+            cond_attention_mask = attention_mask[is_conditional]
+            cond_ring_info = ring_info[is_conditional] - 2
+            logits, _, mu, logvar, ring_pred = model(
+                cond_embeddings, cond_attention_mask, cond_input_ids, cond_ring_info
+            )
+            loss, recon_loss, kld_loss, ring_loss = vae_token_loss(
+                logits, cond_input_ids, mu, logvar, ring_pred, cond_ring_info,
+                epoch, pad_token_id, max_beta, annealing_epochs
+            )
+            cond_loss = loss
+            cond_recon = recon_loss
+            cond_kld = kld_loss
+            cond_ring = ring_loss
+        # 无条件样本（其它环数）
+        uncond_loss = uncond_recon = uncond_kld = 0.0
+        if (~is_conditional).any():
+            uncond_embeddings = embeddings[~is_conditional]
+            uncond_input_ids = input_ids[~is_conditional]
+            uncond_attention_mask = attention_mask[~is_conditional]
+            # 不传ring_info
+            logits, _, mu, logvar, _ = model(
+                uncond_embeddings, uncond_attention_mask, uncond_input_ids, None
+            )
+            # 只计算重建和KL loss，ring_loss为0
+            loss, recon_loss, kld_loss, _ = vae_token_loss(
+                logits, uncond_input_ids, mu, logvar, None, None,
+                epoch, pad_token_id, max_beta, annealing_epochs
+            )
+            uncond_loss = loss
+            uncond_recon = recon_loss
+            uncond_kld = kld_loss
+        # 合并loss
+        total_loss = cond_loss + uncond_loss
+        total_recon_loss = cond_recon + uncond_recon
+        total_kld_loss = cond_kld + uncond_kld
+        total_ring_loss = cond_ring  # 只统计有条件样本的ring_loss
         # 反向传播
-        loss.backward()
+        optimizer.zero_grad()
+        total_loss.backward()
         optimizer.step()
-        
         # 累加损失
-        total_loss += loss.item()
-        total_recon_loss += recon_loss.item()
-        total_kld_loss += kld_loss.item()
-        total_ring_loss += ring_loss.item()
+        total_loss += total_loss.item()
+        total_recon_loss += total_recon_loss.item()
+        total_kld_loss += total_kld_loss.item()
+        total_ring_loss += total_ring_loss.item()
         
         # 打印进度
         if batch_idx % 10 == 0:
             print(f'Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\t'
-                  f'Loss: {loss.item():.6f}')
+                  f'Loss: {total_loss.item():.6f}')
     
     # 计算平均损失
     avg_loss = total_loss / len(train_loader)
@@ -210,47 +247,61 @@ def validate(
     total_recon_loss = 0
     total_kld_loss = 0
     total_ring_loss = 0
-    
     with torch.no_grad():
         for batch in tqdm(val_loader, desc="Validation"):
-            # 获取数据
-            embeddings = batch['embeddings'].to(device)  # [batch_size, seq_len, embed_dim]
+            embeddings = batch['embeddings'].to(device)
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             ring_info = batch['ring_info'].to(device)
-            
-            # 前向传播
-            logits, _, mu, logvar, ring_pred = model(
-                embeddings,  # 使用embeddings而不是input_ids
-                attention_mask=attention_mask,
-                target_ids=input_ids,
-                ring_info=ring_info
-            )
-            
-            # 计算损失
-            loss, recon_loss, kl_loss, ring_loss = vae_token_loss(
-                logits,
-                input_ids,
-                mu,
-                logvar,
-                ring_pred,
-                ring_info,
-                epoch=0  # 验证时不需要beta退火
-            )
-            
-            # 更新统计信息
-            total_loss += loss.item()
-            total_recon_loss += recon_loss.item()
-            total_kld_loss += kl_loss.item()
-            total_ring_loss += ring_loss.item()
-    
-    # 计算平均损失
+            is_conditional = (ring_info >= 2) & (ring_info <= 5)
+            # 有条件样本
+            cond_loss = cond_recon = cond_kld = cond_ring = 0.0
+            if is_conditional.any():
+                cond_embeddings = embeddings[is_conditional]
+                cond_input_ids = input_ids[is_conditional]
+                cond_attention_mask = attention_mask[is_conditional]
+                cond_ring_info = ring_info[is_conditional] - 2
+                logits, _, mu, logvar, ring_pred = model(
+                    cond_embeddings, cond_attention_mask, cond_input_ids, cond_ring_info
+                )
+                loss, recon_loss, kl_loss, ring_loss = vae_token_loss(
+                    logits, cond_input_ids, mu, logvar, ring_pred, cond_ring_info,
+                    epoch=0, pad_token_id=pad_token_id
+                )
+                cond_loss = loss
+                cond_recon = recon_loss
+                cond_kld = kl_loss
+                cond_ring = ring_loss
+            # 无条件样本
+            uncond_loss = uncond_recon = uncond_kld = 0.0
+            if (~is_conditional).any():
+                uncond_embeddings = embeddings[~is_conditional]
+                uncond_input_ids = input_ids[~is_conditional]
+                uncond_attention_mask = attention_mask[~is_conditional]
+                logits, _, mu, logvar, _ = model(
+                    uncond_embeddings, uncond_attention_mask, uncond_input_ids, None
+                )
+                loss, recon_loss, kl_loss, _ = vae_token_loss(
+                    logits, uncond_input_ids, mu, logvar, None, None,
+                    epoch=0, pad_token_id=pad_token_id
+                )
+                uncond_loss = loss
+                uncond_recon = recon_loss
+                uncond_kld = kl_loss
+            # 合并loss
+            batch_loss = cond_loss + uncond_loss
+            batch_recon = cond_recon + uncond_recon
+            batch_kld = cond_kld + uncond_kld
+            batch_ring = cond_ring  # 只统计有条件样本的ring_loss
+            total_loss += batch_loss.item()
+            total_recon_loss += batch_recon.item()
+            total_kld_loss += batch_kld.item()
+            total_ring_loss += batch_ring.item()
     num_batches = len(val_loader)
     avg_loss = total_loss / num_batches
     avg_recon_loss = total_recon_loss / num_batches
     avg_kld_loss = total_kld_loss / num_batches
     avg_ring_loss = total_ring_loss / num_batches
-    
     return {
         'loss': avg_loss,
         'recon_loss': avg_recon_loss,
@@ -380,7 +431,8 @@ def main(args=None):
         max_sequence_length=args.max_length,
         pad_token_id=pad_token_id,
         use_layer_norm=True,
-        dropout=args.dropout
+        dropout=args.dropout,
+        num_classes=6  # 环数分类类别数（2~7）
     ).to(device)
     
     # 初始化优化器

@@ -29,7 +29,8 @@ class ESMVAEToken(nn.Module):
         dropout: float = 0.1,
         rnn_hidden_dim: int = 256,
         num_rnn_layers: int = 1,
-        ring_embedding_dim: int = 32  # 添加环数嵌入维度
+        ring_embedding_dim: int = 32,  # 添加环数嵌入维度
+        num_classes: int = 6           # 新增类别数参数，默认6
     ):
         """初始化VAE模型
         
@@ -45,6 +46,7 @@ class ESMVAEToken(nn.Module):
             rnn_hidden_dim: RNN隐藏层维度
             num_rnn_layers: RNN层数
             ring_embedding_dim: 环数嵌入维度
+            num_classes: 环数分类类别数（如2~7共6类）
         """
         super().__init__()
         self.input_dim = input_dim
@@ -57,6 +59,7 @@ class ESMVAEToken(nn.Module):
         self.rnn_hidden_dim = rnn_hidden_dim
         self.num_rnn_layers = num_rnn_layers
         self.ring_embedding_dim = ring_embedding_dim
+        self.num_classes = num_classes
         
         # 构建编码器
         self.encoder = self.build_encoder()
@@ -95,7 +98,7 @@ class ESMVAEToken(nn.Module):
             nn.Linear(64, 32),
             nn.LayerNorm(32),
             nn.LeakyReLU(),
-            nn.Linear(32, 1)  # 预测环数
+            nn.Linear(32, num_classes)  # 分类输出
         )
         
         # 特殊token IDs
@@ -219,8 +222,11 @@ class ESMVAEToken(nn.Module):
             if ring_info.device != z.device:
                 ring_info = ring_info.to(z.device)
             ring_embedding = self.encode_ring_info(ring_info)
-            # 将潜在向量和环数嵌入连接
-            z = torch.cat([z, ring_embedding], dim=-1)
+        else:
+            # 无条件时拼接全零embedding
+            ring_embedding = torch.zeros(z.size(0), self.ring_embedding_dim, device=z.device)
+        # 将潜在向量和环数嵌入连接
+        z = torch.cat([z, ring_embedding], dim=-1)
         
         # 准备RNN初始隐藏状态
         h0 = self.latent_to_rnn_hidden(z)  # [batch_size, rnn_hidden_dim * num_layers]
@@ -282,25 +288,23 @@ class ESMVAEToken(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         target_ids: Optional[torch.Tensor] = None,
         ring_info: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """前向传播
         
         Args:
             x: 输入张量，形状为 [batch_size, seq_len, input_dim]
             attention_mask: 注意力掩码，形状为 [batch_size, seq_len]
             target_ids: 目标token IDs，形状为 [batch_size, max_sequence_length]
-            ring_info: 环数信息，形状为 [batch_size]
+            ring_info: 环数信息，形状为 [batch_size]，可为None
             
         Returns:
-            (重构logits, 输入token IDs, 均值, 对数方差, 环数预测)
+            (重构logits/生成token IDs, 输入token IDs, 均值, 对数方差, 环数预测/None)
         """
         # 编码
         mu, logvar = self.encode(x, attention_mask)
         z = self.reparameterize(mu, logvar)
-        
-        # 预测环数
-        ring_pred = self.ring_predictor(z)
-        
+        # 预测环数（仅有条件时）
+        ring_pred = self.ring_predictor(mu) if ring_info is not None else None
         # 解码
         if target_ids is not None:
             logits = self.decode(z, target_ids, ring_info)
