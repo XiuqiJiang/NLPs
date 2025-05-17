@@ -75,6 +75,9 @@ def load_model(model_path: str) -> tuple[ESMVAEToken, AutoTokenizer]:
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
     
+    # 赋值tokenizer属性，便于后续decode
+    model.tokenizer = tokenizer
+    
     return model, tokenizer
 
 def generate_sequences(
@@ -130,14 +133,16 @@ def generate_sequences(
             # 找到EOS token的位置
             eos_pos = (ids == model.eos_token_id).nonzero()
             if len(eos_pos) > 0:
-                ids = ids[:eos_pos[0]]
+                ids = ids[:eos_pos[0].item()]
             
             # 移除padding和特殊token
             ids = ids[ids != model.pad_token_id]
             ids = ids[ids != model.sos_token_id]
             ids = ids[ids != model.eos_token_id]
             
-            # 转换为序列
+            # 转换为序列，确保为list
+            if isinstance(ids, torch.Tensor):
+                ids = ids.detach().cpu().tolist()
             sequence = model.tokenizer.decode(ids)
             cysteine_count = sequence.count('C')
             
@@ -179,12 +184,18 @@ def generate_sequences_with_rings(
     )
     
     # 创建数据加载器
+    if str(device).startswith('cuda'):
+        num_workers = NUM_WORKERS
+        pin_memory = True
+    else:
+        num_workers = 0
+        pin_memory = False
     dataloader = DataLoader(
         dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=NUM_WORKERS,
-        pin_memory=PIN_MEMORY
+        num_workers=num_workers,
+        pin_memory=pin_memory
     )
     
     # 收集三环序列的潜在向量
@@ -245,7 +256,7 @@ def generate_sequences_with_rings(
     # 解码（使用自回归模式，加入条件）
     logger.info("开始解码生成序列...")
     with torch.no_grad():
-        generated_token_ids = model.decode(z, target_ids=None, condition=condition)
+        generated_token_ids = model.decode(z, target_ids=None, ring_info=condition)
     
     # 将生成的token ids转换回序列
     valid_sequences = []
@@ -253,7 +264,11 @@ def generate_sequences_with_rings(
     
     for i in range(len(generated_token_ids)):
         total_generated += 1
-        sequence = tokenizer.decode(generated_token_ids[i], skip_special_tokens=True)
+        # 确保为list
+        ids = generated_token_ids[i]
+        if isinstance(ids, torch.Tensor):
+            ids = ids.detach().cpu().tolist()
+        sequence = tokenizer.decode(ids, skip_special_tokens=True)
         cysteine_count = sequence.count('C')
         if cysteine_count == target_rings:
             valid_sequences.append(sequence)
@@ -287,12 +302,15 @@ def generate_sequences_with_rings(
         
         # 解码
         with torch.no_grad():
-            generated_token_ids = model.decode(z, target_ids=None, condition=condition)
+            generated_token_ids = model.decode(z, target_ids=None, ring_info=condition)
         
         # 检查新生成的序列
         batch_valid = 0
         for i in range(len(generated_token_ids)):
-            sequence = tokenizer.decode(generated_token_ids[i], skip_special_tokens=True)
+            ids = generated_token_ids[i]
+            if isinstance(ids, torch.Tensor):
+                ids = ids.detach().cpu().tolist()
+            sequence = tokenizer.decode(ids, skip_special_tokens=True)
             cysteine_count = sequence.count('C')
             if cysteine_count == target_rings and sequence not in valid_sequences:
                 valid_sequences.append(sequence)
@@ -313,7 +331,9 @@ def generate_sequences_with_rings(
     logger.info(f"总共生成了 {len(valid_sequences)} 个有效序列")
     
     # 保存生成的序列
-    os.makedirs(os.path.dirname(GENERATED_SEQUENCES_PATH), exist_ok=True)
+    output_dir = os.path.dirname(GENERATED_SEQUENCES_PATH)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     with open(GENERATED_SEQUENCES_PATH, 'w') as f:
         for seq in valid_sequences:
             f.write(seq + '\n')
@@ -362,7 +382,9 @@ def main():
     logger.info(f"使用默认输出路径: {output_file}")
     
     # 保存序列
-    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    output_dir = os.path.dirname(output_file)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
     with open(output_file, 'w') as f:
         for i, seq in enumerate(sequences, 1):
             f.write(f">Generated_{i}\n{seq}\n")

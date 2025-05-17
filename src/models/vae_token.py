@@ -215,6 +215,9 @@ class ESMVAEToken(nn.Module):
         
         # 编码环数信息
         if ring_info is not None:
+            # 确保ring_info和z在同一设备上
+            if ring_info.device != z.device:
+                ring_info = ring_info.to(z.device)
             ring_embedding = self.encode_ring_info(ring_info)
             # 将潜在向量和环数嵌入连接
             z = torch.cat([z, ring_embedding], dim=-1)
