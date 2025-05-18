@@ -29,7 +29,7 @@ os.makedirs(ESM_OUTPUT_DIR, exist_ok=True)
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # 模型配置
-ESM_MODEL_PATH = os.path.join(ROOT_DIR, "esm_model")
+ESM_MODEL_PATH = os.environ.get("ESM_MODEL_PATH", "/content/drive/MyDrive/esm_model")  # 默认Google Drive路径，可通过环境变量覆盖
 ESM_MODEL_NAME = "esm2-fine-tune"
 ESM_EMBEDDING_DIM = 640
 ESM_FINETUNE_EPOCHS = 6

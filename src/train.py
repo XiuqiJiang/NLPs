@@ -413,8 +413,8 @@ def main(args=None):
     # 加载ESM tokenizer以获取词汇表大小
     logger.info("加载ESM tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(
-        ESM_MODEL_PATH,  # 使用config.py中定义的路径
-        local_files_only=True  # 强制使用本地文件
+        ESM_MODEL_PATH,  # 使用config.py中定义的路径，已指向Google Drive
+        local_files_only=True
     )
     vocab_size = tokenizer.vocab_size
     pad_token_id = tokenizer.pad_token_id

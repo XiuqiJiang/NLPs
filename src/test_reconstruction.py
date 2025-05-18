@@ -163,8 +163,8 @@ def calculate_sequence_similarity(seq1: str, seq2: str) -> float:
         相似度，范围[0,1]
     """
     # 移除特殊token
-    seq1 = seq1.replace('<pad>', '').replace('<s>', '').replace('</s>', '')
-    seq2 = seq2.replace('<pad>', '').replace('<s>', '').replace('</s>', '')
+    seq1 = seq1.replace('<pad>', '').replace('', '').replace('', '')
+    seq2 = seq2.replace('<pad>', '').replace('', '').replace('', '')
     
     if not seq1 or not seq2:
         return 0.0
@@ -219,7 +219,7 @@ def calculate_aa_composition(seq: str) -> dict:
         包含每个氨基酸比例的字典
     """
     # 移除特殊token
-    seq = seq.replace('<pad>', '').replace('<s>', '').replace('</s>', '')
+    seq = seq.replace('<pad>', '').replace('', '').replace('', '')
     
     if not seq:
         return {}

@@ -179,8 +179,8 @@ def create_data_loaders(
     
     # 加载tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
-        ESM_MODEL_PATH,  # 使用config.py中定义的路径
-        local_files_only=True  # 强制使用本地文件
+        ESM_MODEL_PATH,  # 使用config.py中定义的路径，已指向Google Drive
+        local_files_only=True
     )
     
     # 创建数据集
@@ -332,8 +332,8 @@ def preprocess_and_embed(
     
     # 加载模型和tokenizer
     print(f"从 {model_path} 加载模型...")
-    model = AutoModelForMaskedLM.from_pretrained(model_path)
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+    model = AutoModelForMaskedLM.from_pretrained(ESM_MODEL_PATH, local_files_only=True)
+    tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_PATH, local_files_only=True)
     
     print(f"模型词汇表大小: {model.config.vocab_size}")
     print(f"Tokenizer词汇表大小: {len(tokenizer)}")
