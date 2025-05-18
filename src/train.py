@@ -87,7 +87,6 @@ def vae_token_loss(
     Returns:
         (总损失, 重建损失, KL损失, 环数损失)
     """
-    # 计算当前epoch的beta值，使用传入的参数
     beta = get_beta(epoch, max_beta=max_beta, annealing_epochs=annealing_epochs)
     
     # 计算重建损失（交叉熵）
@@ -99,12 +98,8 @@ def vae_token_loss(
     # 计算KL散度
     kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
     
-    # 使用Free Bits策略：只有当KLD超过目标值时才计算损失
-    # 公式：max(0, KLD - K)
-    free_bits_kl_loss = torch.max(torch.zeros_like(kl_loss), kl_loss - kld_target)
-    
-    # 总损失
-    loss = recon_loss + beta * free_bits_kl_loss
+    # KL target loss
+    loss = recon_loss + beta * torch.abs(kl_loss - kld_target)
     
     # 计算环数损失（仅有条件时）
     if ring_pred is not None and ring_info is not None:
@@ -143,10 +138,10 @@ def train_epoch(
         包含训练损失的字典
     """
     model.train()
-    total_loss = 0
-    total_recon_loss = 0
-    total_kld_loss = 0
-    total_ring_loss = 0
+    sum_loss = 0
+    sum_recon_loss = 0
+    sum_kld_loss = 0
+    sum_ring_loss = 0
     
     for batch_idx, batch in enumerate(train_loader):
         embeddings = batch['embeddings'].to(device)
@@ -199,12 +194,14 @@ def train_epoch(
         # 反向传播
         optimizer.zero_grad()
         total_loss.backward()
+        # 梯度裁剪
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         # 累加损失
-        total_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
-        total_recon_loss += total_recon_loss.item() if isinstance(total_recon_loss, torch.Tensor) else total_recon_loss
-        total_kld_loss += total_kld_loss.item() if isinstance(total_kld_loss, torch.Tensor) else total_kld_loss
-        total_ring_loss += total_ring_loss.item() if isinstance(total_ring_loss, torch.Tensor) else total_ring_loss
+        sum_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
+        sum_recon_loss += total_recon_loss.item() if isinstance(total_recon_loss, torch.Tensor) else total_recon_loss
+        sum_kld_loss += total_kld_loss.item() if isinstance(total_kld_loss, torch.Tensor) else total_kld_loss
+        sum_ring_loss += total_ring_loss.item() if isinstance(total_ring_loss, torch.Tensor) else total_ring_loss
         
         # 打印进度
         if batch_idx % 10 == 0:
@@ -213,10 +210,10 @@ def train_epoch(
                   f'Loss: {total_loss.item():.6f}')
     
     # 计算平均损失
-    avg_loss = total_loss / len(train_loader)
-    avg_recon_loss = total_recon_loss / len(train_loader)
-    avg_kld_loss = total_kld_loss / len(train_loader)
-    avg_ring_loss = total_ring_loss / len(train_loader)
+    avg_loss = sum_loss / len(train_loader)
+    avg_recon_loss = sum_recon_loss / len(train_loader)
+    avg_kld_loss = sum_kld_loss / len(train_loader)
+    avg_ring_loss = sum_ring_loss / len(train_loader)
     
     return {
         'loss': avg_loss,
@@ -454,7 +451,9 @@ def main(args=None):
     # 训练循环
     best_val_loss = float('inf')
     for epoch in range(args.epochs):
-        logging.info(f"Epoch {epoch + 1}/{args.epochs}")
+        beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS)
+        print(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
+        logging.info(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
         
         # 训练
         train_losses = train_epoch(
