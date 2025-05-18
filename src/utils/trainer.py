@@ -199,6 +199,22 @@ class VAETrainer:
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}")
         
         for batch in pbar:
+            # 数据检查
+            if (torch.isnan(batch['embeddings']).any() or torch.isinf(batch['embeddings']).any() or
+                torch.isnan(batch['token_ids'].float()).any() or torch.isinf(batch['token_ids'].float()).any() or
+                torch.isnan(batch['attention_mask'].float()).any() or torch.isinf(batch['attention_mask'].float()).any()):
+                print(f"[Train数据异常] batch: nan/inf detected! 跳过该batch。")
+                print(f"embeddings nan: {torch.isnan(batch['embeddings']).any().item()}, inf: {torch.isinf(batch['embeddings']).any().item()}")
+                print(f"token_ids nan: {torch.isnan(batch['token_ids'].float()).any().item()}, inf: {torch.isinf(batch['token_ids'].float()).any().item()}")
+                print(f"attention_mask nan: {torch.isnan(batch['attention_mask'].float()).any().item()}, inf: {torch.isinf(batch['attention_mask'].float()).any().item()}")
+                continue
+            # 极端值检查
+            if (batch['embeddings'].abs().max() > 1e4 or batch['token_ids'].abs().max() > 1e6):
+                print(f"[Train数据异常] batch: 极端值 detected! 跳过该batch。")
+                print(f"embeddings min: {batch['embeddings'].min().item()}, max: {batch['embeddings'].max().item()}")
+                print(f"token_ids min: {batch['token_ids'].min().item()}, max: {batch['token_ids'].max().item()}")
+                continue
+            
             batch = {k: v.to(self.device) for k, v in batch.items()}
             
             # 计算损失，传入所有参数
@@ -339,6 +355,22 @@ class VAETrainer:
         
         with torch.no_grad():
             for batch in val_loader:
+                # 数据检查
+                if (torch.isnan(batch['embeddings']).any() or torch.isinf(batch['embeddings']).any() or
+                    torch.isnan(batch['token_ids'].float()).any() or torch.isinf(batch['token_ids'].float()).any() or
+                    torch.isnan(batch['attention_mask'].float()).any() or torch.isinf(batch['attention_mask'].float()).any()):
+                    print(f"[Val数据异常] batch: nan/inf detected! 跳过该batch。")
+                    print(f"embeddings nan: {torch.isnan(batch['embeddings']).any().item()}, inf: {torch.isinf(batch['embeddings']).any().item()}")
+                    print(f"token_ids nan: {torch.isnan(batch['token_ids'].float()).any().item()}, inf: {torch.isinf(batch['token_ids'].float()).any().item()}")
+                    print(f"attention_mask nan: {torch.isnan(batch['attention_mask'].float()).any().item()}, inf: {torch.isinf(batch['attention_mask'].float()).any().item()}")
+                    continue
+                # 极端值检查
+                if (batch['embeddings'].abs().max() > 1e4 or batch['token_ids'].abs().max() > 1e6):
+                    print(f"[Val数据异常] batch: 极端值 detected! 跳过该batch。")
+                    print(f"embeddings min: {batch['embeddings'].min().item()}, max: {batch['embeddings'].max().item()}")
+                    print(f"token_ids min: {batch['token_ids'].min().item()}, max: {batch['token_ids'].max().item()}")
+                    continue
+                
                 # 将数据移动到正确的设备上
                 batch = {k: v.to(self.device) for k, v in batch.items()}
                 

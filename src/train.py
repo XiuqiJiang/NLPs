@@ -149,6 +149,22 @@ def train_epoch(
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         ring_info = batch['ring_info'].to(device)
+        # 数据检查
+        if (torch.isnan(embeddings).any() or torch.isinf(embeddings).any() or
+            torch.isnan(input_ids.float()).any() or torch.isinf(input_ids.float()).any() or
+            torch.isnan(ring_info.float()).any() or torch.isinf(ring_info.float()).any()):
+            print(f"[数据异常] batch {batch_idx}: nan/inf detected! 跳过该batch。")
+            print(f"embeddings nan: {torch.isnan(embeddings).any().item()}, inf: {torch.isinf(embeddings).any().item()}")
+            print(f"input_ids nan: {torch.isnan(input_ids.float()).any().item()}, inf: {torch.isinf(input_ids.float()).any().item()}")
+            print(f"ring_info nan: {torch.isnan(ring_info.float()).any().item()}, inf: {torch.isinf(ring_info.float()).any().item()}")
+            continue
+        # 极端值检查
+        if (embeddings.abs().max() > 1e4 or input_ids.abs().max() > 1e6 or ring_info.abs().max() > 1e3):
+            print(f"[数据异常] batch {batch_idx}: 极端值 detected! 跳过该batch。")
+            print(f"embeddings min: {embeddings.min().item()}, max: {embeddings.max().item()}")
+            print(f"input_ids min: {input_ids.min().item()}, max: {input_ids.max().item()}")
+            print(f"ring_info min: {ring_info.min().item()}, max: {ring_info.max().item()}")
+            continue
         # 区分有条件和无条件样本
         is_conditional = (ring_info >= 2) & (ring_info <= 5)
         # 有条件样本（2~5环，映射为0~3）
@@ -246,11 +262,27 @@ def validate(
     total_kld_loss = 0
     total_ring_loss = 0
     with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Validation"):
+        for batch_idx, batch in enumerate(val_loader):
             embeddings = batch['embeddings'].to(device)
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             ring_info = batch['ring_info'].to(device)
+            # 数据检查
+            if (torch.isnan(embeddings).any() or torch.isinf(embeddings).any() or
+                torch.isnan(input_ids.float()).any() or torch.isinf(input_ids.float()).any() or
+                torch.isnan(ring_info.float()).any() or torch.isinf(ring_info.float()).any()):
+                print(f"[Val数据异常] batch {batch_idx}: nan/inf detected! 跳过该batch。")
+                print(f"embeddings nan: {torch.isnan(embeddings).any().item()}, inf: {torch.isinf(embeddings).any().item()}")
+                print(f"input_ids nan: {torch.isnan(input_ids.float()).any().item()}, inf: {torch.isinf(input_ids.float()).any().item()}")
+                print(f"ring_info nan: {torch.isnan(ring_info.float()).any().item()}, inf: {torch.isinf(ring_info.float()).any().item()}")
+                continue
+            # 极端值检查
+            if (embeddings.abs().max() > 1e4 or input_ids.abs().max() > 1e6 or ring_info.abs().max() > 1e3):
+                print(f"[Val数据异常] batch {batch_idx}: 极端值 detected! 跳过该batch。")
+                print(f"embeddings min: {embeddings.min().item()}, max: {embeddings.max().item()}")
+                print(f"input_ids min: {input_ids.min().item()}, max: {input_ids.max().item()}")
+                print(f"ring_info min: {ring_info.min().item()}, max: {ring_info.max().item()}")
+                continue
             is_conditional = (ring_info >= 2) & (ring_info <= 5)
             # 有条件样本
             cond_loss = cond_recon = cond_kld = cond_ring = 0.0
