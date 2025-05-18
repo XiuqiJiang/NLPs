@@ -39,35 +39,34 @@ MAX_SEQUENCE_LENGTH = 64
 
 # 训练配置
 BATCH_SIZE = 32
-NUM_EPOCHS = 200  # 修改为200轮
+NUM_EPOCHS = 400  # 修改为400轮
 LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
 # VAE训练参数
-MAX_BETA = 0.01  # KL散度的最大权重，调回较小值
-ANNEALING_EPOCHS = 200  # 退火周期
-KLD_TARGET = 0.0
+MAX_BETA = 0.1
+WARMUP_EPOCHS = 30
+ANNEALING_EPOCHS = 100
+KLD_TARGET = 10.0  # KL target loss目标值
+KLD_TARGET_WEIGHT = 0.1  # KL target loss权重
+KLD_FLOOR = 10.0  # KL loss的下限
 
-def get_beta(epoch: int, max_beta: float = MAX_BETA, annealing_epochs: int = ANNEALING_EPOCHS) -> float:
+def get_beta(epoch: int, max_beta: float = MAX_BETA, annealing_epochs: int = ANNEALING_EPOCHS, warmup_epochs: int = WARMUP_EPOCHS) -> float:
     """计算当前epoch的beta值
     
     Args:
         epoch: 当前epoch
         max_beta: 最大beta值
         annealing_epochs: beta退火的周期数
-        
+        warmup_epochs: 预热期epoch数
     Returns:
         beta值，范围从0到max_beta
     """
-    warmup_epochs = 60  # 预热期epoch数
-    annealing_epochs_after_warmup = annealing_epochs - warmup_epochs
-    
     if epoch < warmup_epochs:
         return 0.0
     else:
-        # 计算预热期结束后的当前退火阶段的epoch
         current_annealing_epoch = epoch - warmup_epochs
-        # 线性增长 beta
+        annealing_epochs_after_warmup = annealing_epochs - warmup_epochs
         beta = min(1.0, current_annealing_epoch / annealing_epochs_after_warmup) * max_beta
         return beta
 

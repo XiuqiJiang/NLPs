@@ -68,7 +68,8 @@ def load_model(model_path: str) -> tuple[ESMVAEToken, AutoTokenizer]:
         max_sequence_length=MAX_SEQUENCE_LENGTH,
         pad_token_id=tokenizer.pad_token_id,
         use_layer_norm=True,
-        dropout=0.1
+        dropout=0.1,
+        num_classes=8  # 保证与训练时一致
     ).to(DEVICE)
     
     # 加载模型权重
@@ -168,11 +169,18 @@ def generate_sequences_with_rings(
     generated_sequences = []
     logger = logging.getLogger(__name__)
     
-    # 加载数据
+    # 加载数据，自动兼容dict或list格式
     logger.info(f"正在加载数据文件: {EMBEDDING_FILE}")
     data = torch.load(EMBEDDING_FILE)
-    sequences = data['sequences']
-    embeddings = data['embeddings']
+    if isinstance(data, dict) and 'sequences' in data and 'embeddings' in data:
+        sequences = data['sequences']
+        embeddings = data['embeddings']
+    elif isinstance(data, list):
+        sequences = [item['sequence'] for item in data]
+        embeddings = [item['embedding'] for item in data]
+        embeddings = torch.stack(embeddings)
+    else:
+        raise ValueError("未知的数据格式，请检查EMBEDDING_FILE内容！")
     logger.info(f"加载了 {len(sequences)} 个序列")
     
     # 创建数据集
@@ -261,22 +269,24 @@ def generate_sequences_with_rings(
     # 将生成的token ids转换回序列
     valid_sequences = []
     total_generated = 0
-    
+    c_count_stat = {}
     for i in range(len(generated_token_ids)):
         total_generated += 1
-        # 确保为list
         ids = generated_token_ids[i]
         if isinstance(ids, torch.Tensor):
             ids = ids.detach().cpu().tolist()
         sequence = tokenizer.decode(ids, skip_special_tokens=True)
         cysteine_count = sequence.count('C')
-        if cysteine_count == target_rings:
+        # 统计C数量分布
+        c_count_stat[cysteine_count] = c_count_stat.get(cysteine_count, 0) + 1
+        # 放宽判定条件
+        if abs(cysteine_count - target_rings) <= 1:
             valid_sequences.append(sequence)
             logger.info(f"\n生成的序列 {len(valid_sequences)}:")
             logger.info(sequence)
             logger.info(f"环数: {cysteine_count}")
-    
-    logger.info(f"第一轮生成了 {total_generated} 个序列，其中 {len(valid_sequences)} 个符合要求")
+    logger.info(f"采样到的C数量分布: {c_count_stat}")
+    logger.info(f"第一轮生成了 {total_generated} 个序列，其中 {len(valid_sequences)} 个C数在[{target_rings-1},{target_rings+1}]范围内")
     
     # 如果有效序列不足，继续生成直到达到要求
     generation_attempts = 0
@@ -312,7 +322,10 @@ def generate_sequences_with_rings(
                 ids = ids.detach().cpu().tolist()
             sequence = tokenizer.decode(ids, skip_special_tokens=True)
             cysteine_count = sequence.count('C')
-            if cysteine_count == target_rings and sequence not in valid_sequences:
+            # 统计C数量分布
+            c_count_stat[cysteine_count] = c_count_stat.get(cysteine_count, 0) + 1
+            # 放宽判定条件
+            if abs(cysteine_count - target_rings) <= 1:
                 valid_sequences.append(sequence)
                 batch_valid += 1
                 logger.info(f"\n生成的序列 {len(valid_sequences)}:")
@@ -341,56 +354,96 @@ def generate_sequences_with_rings(
     logger.info(f"序列已保存到 {GENERATED_SEQUENCES_PATH}")
     logger.info("序列生成完成！")
     
+    print(f"采样到的C数量分布: {c_count_stat}")
+    
     return valid_sequences
+
+def global_sample_sequences(
+    model,
+    tokenizer,
+    num_sequences=100,
+    ring_info_value=2,  # 目标环数类别（如3环就填2，需与训练映射一致）
+    temperature=1.0,
+    device='cuda'
+):
+    """
+    全局采样：直接从标准正态分布采样z，指定环数条件，生成蛋白质序列
+    """
+    model.eval()
+    results = []
+    with torch.no_grad():
+        # 1. 采样z
+        z = torch.randn(num_sequences, model.latent_dim, device=device) * temperature
+        # 2. 构造环数条件
+        ring_info = torch.full((num_sequences,), ring_info_value, dtype=torch.long, device=device)
+        # 3. 解码生成token id序列
+        generated_ids = model.decode(z, target_ids=None, ring_info=ring_info)
+        # 4. 转为蛋白质序列字符串
+        for ids in generated_ids:
+            # 截断到EOS
+            eos_pos = (ids == model.eos_token_id).nonzero()
+            if len(eos_pos) > 0:
+                ids = ids[:eos_pos[0].item()]
+            # 移除特殊token
+            ids = ids[(ids != model.pad_token_id) & (ids != model.sos_token_id) & (ids != model.eos_token_id)]
+            seq = tokenizer.decode(ids.cpu().tolist())
+            results.append(seq)
+    return results
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description='生成新的蛋白质序列')
-    parser.add_argument('--num_sequences', type=int, default=100, help='要生成的序列数量')
-    parser.add_argument('--target_rings', type=int, required=True, help='目标环数')
-    parser.add_argument('--ring_variance', type=int, default=1, help='允许的环数变化范围')
+    parser = argparse.ArgumentParser(description="蛋白质VAE序列生成")
+    parser.add_argument('--model_path', type=str, required=True, help='模型权重路径')
+    parser.add_argument('--num_sequences', type=int, default=100, help='生成序列数量')
+    parser.add_argument('--ring_info', type=int, default=2, help='目标环数类别（如3环就填2，需与训练映射一致）')
     parser.add_argument('--temperature', type=float, default=1.0, help='采样温度')
-    parser.add_argument('--top_k', type=int, default=50, help='top-k采样的k值')
-    parser.add_argument('--top_p', type=float, default=0.95, help='nucleus采样的p值')
+    parser.add_argument('--global_sample', action='store_true', help='是否启用全局采样模式')
     args = parser.parse_args()
     
     logger = setup_logging()
     logger.info("开始生成序列...")
     
     # 使用默认模型路径
-    model_path = os.path.join(MODEL_SAVE_DIR, 'best_model.pt')
+    model_path = args.model_path
     logger.info(f"使用默认模型路径: {model_path}")
     
     # 加载模型
     logger.info(f"从 {model_path} 加载模型...")
     model, tokenizer = load_model(model_path)
     
-    # 生成序列
-    sequences = generate_sequences(
-        model=model,
-        num_sequences=args.num_sequences,
-        target_rings=args.target_rings,
-        device=DEVICE,
-        temperature=args.temperature,
-        top_k=args.top_k,
-        top_p=args.top_p,
-        ring_variance=args.ring_variance
-    )
-    
-    # 使用默认输出路径
-    output_file = GENERATED_SEQUENCES_PATH
-    logger.info(f"使用默认输出路径: {output_file}")
-    
-    # 保存序列
-    output_dir = os.path.dirname(output_file)
-    if output_dir:
-        os.makedirs(output_dir, exist_ok=True)
-    with open(output_file, 'w') as f:
-        for i, seq in enumerate(sequences, 1):
-            f.write(f">Generated_{i}\n{seq}\n")
-    
-    logger.info(f"序列已保存到 {output_file}")
-    logger.info("生成完成！")
+    if args.global_sample:
+        print(f"[全局采样] 采样{args.num_sequences}条，环数类别={args.ring_info}")
+        samples = global_sample_sequences(
+            model,
+            tokenizer,
+            num_sequences=args.num_sequences,
+            ring_info_value=args.ring_info,
+            temperature=args.temperature,
+            device=DEVICE
+        )
+        for i, seq in enumerate(samples):
+            print(f">Sample_{i+1}\n{seq}")
+        print(f"共生成{len(samples)}条序列")
+        return
+
+    # 支持多个环数批量生成，局部高斯采样
+    ring_list = [args.ring_info]
+
+    for ring in ring_list:
+        logger.info(f"\n=== 目标环数: {ring} ===")
+        sequences = generate_sequences_with_rings(
+            model=model,
+            tokenizer=tokenizer,
+            num_sequences=args.num_sequences,
+            target_rings=ring,
+            temperature=args.temperature,
+            max_length=MAX_SEQUENCE_LENGTH,
+            device=DEVICE
+        )
+        unique_seqs = set(sequences)
+        logger.info(f"目标环数{ring}: 采样{args.num_sequences}次，unique序列数: {len(unique_seqs)}，unique比例: {len(unique_seqs)/args.num_sequences:.2f}")
+        for i, seq in enumerate(unique_seqs, 1):
+            print(f">Ring{ring}_Sample{i}\n{seq}")
 
 if __name__ == "__main__":
     main() 

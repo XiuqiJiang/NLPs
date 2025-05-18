@@ -154,9 +154,9 @@ class VAETrainer:
         # mu, logvar: [batch, latent_dim]
         kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)  # [batch]
         kl_loss = kl_per_sample.mean()  # 标量
-        
-        # 直接使用原始KL损失
-        total_loss = recon_loss + beta * kl_loss
+        # KL target loss软约束
+        kld_target_component = KLD_TARGET_WEIGHT * (kl_loss - KLD_TARGET) ** 2
+        total_loss = recon_loss + beta * kl_loss + kld_target_component
         
         loss_dict = {
             'total_loss': total_loss.item(),

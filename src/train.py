@@ -52,7 +52,8 @@ from config.config import (
     get_beta,
     MAX_BETA,
     ANNEALING_EPOCHS,
-    KLD_TARGET
+    KLD_TARGET,
+    WARMUP_EPOCHS
     )
 from src.utils.ring_utils import get_ring_info, analyze_ring_distribution
 
@@ -80,7 +81,7 @@ def vae_token_loss(
     Returns:
         (总损失, 重建损失, KL损失, 环数损失)
     """
-    beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS)
+    beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS, warmup_epochs=WARMUP_EPOCHS)
     # 计算重建损失（交叉熵）
     recon_loss = nn.CrossEntropyLoss(reduction='mean', ignore_index=pad_token_id)(
         recon_logits.view(-1, recon_logits.size(-1)),
@@ -94,9 +95,11 @@ def vae_token_loss(
     # 计算环数损失（仅有条件时）
     if ring_pred is not None and ring_info is not None:
         ring_info = ring_info.long()
+        # 将实际环数标签（如1~8）映射为0~N-1
+        ring_info_mapped = ring_info - 1  # 1~8 → 0~7
         num_classes = ring_pred.shape[1] if ring_pred.dim() > 1 else 1
-        assert ring_info.min() >= 0 and ring_info.max() < num_classes, f"标签越界: {ring_info.min()} ~ {ring_info.max()}，类别数: {num_classes}"
-        ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info)
+        assert ring_info_mapped.min() >= 0 and ring_info_mapped.max() < num_classes, f"标签越界: {ring_info_mapped.min()} ~ {ring_info_mapped.max()}，类别数: {num_classes}"
+        ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info_mapped)
     else:
         ring_loss = torch.tensor(0.0, device=recon_logits.device)
     return loss, recon_loss, kl_loss, ring_loss
@@ -133,82 +136,28 @@ def train_epoch(
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         ring_info = batch['ring_info'].to(device)
-        # 数据检查
-        if (torch.isnan(embeddings).any() or torch.isinf(embeddings).any() or
-            torch.isnan(input_ids.float()).any() or torch.isinf(input_ids.float()).any() or
-            torch.isnan(ring_info.float()).any() or torch.isinf(ring_info.float()).any()):
-            print(f"[数据异常] batch {batch_idx}: nan/inf detected! 跳过该batch。")
-            print(f"embeddings nan: {torch.isnan(embeddings).any().item()}, inf: {torch.isinf(embeddings).any().item()}")
-            print(f"input_ids nan: {torch.isnan(input_ids.float()).any().item()}, inf: {torch.isinf(input_ids.float()).any().item()}")
-            print(f"ring_info nan: {torch.isnan(ring_info.float()).any().item()}, inf: {torch.isinf(ring_info.float()).any().item()}")
-            continue
-        # 极端值检查
-        if (embeddings.abs().max() > 1e4 or input_ids.abs().max() > 1e6 or ring_info.abs().max() > 1e3):
-            print(f"[数据异常] batch {batch_idx}: 极端值 detected! 跳过该batch。")
-            print(f"embeddings min: {embeddings.min().item()}, max: {embeddings.max().item()}")
-            print(f"input_ids min: {input_ids.min().item()}, max: {input_ids.max().item()}")
-            print(f"ring_info min: {ring_info.min().item()}, max: {ring_info.max().item()}")
-            continue
-        # 区分有条件和无条件样本
-        is_conditional = (ring_info >= 2) & (ring_info <= 5)
-        # 有条件样本（2~5环，映射为0~3）
-        cond_loss = cond_recon = cond_kld = cond_ring = 0.0
-        if is_conditional.any():
-            cond_embeddings = embeddings[is_conditional]
-            cond_input_ids = input_ids[is_conditional]
-            cond_attention_mask = attention_mask[is_conditional]
-            cond_ring_info = ring_info[is_conditional] - 2
-            logits, _, mu, logvar, ring_pred = model(
-                cond_embeddings, cond_attention_mask, cond_input_ids, cond_ring_info
-            )
-            loss, recon_loss, kld_loss, ring_loss = vae_token_loss(
-                logits, cond_input_ids, mu, logvar, ring_pred, cond_ring_info,
-                epoch, pad_token_id
-            )
-            cond_loss = loss
-            cond_recon = recon_loss
-            cond_kld = kld_loss
-            cond_ring = ring_loss
-        # 无条件样本（其它环数）
-        uncond_loss = uncond_recon = uncond_kld = 0.0
-        if (~is_conditional).any():
-            uncond_embeddings = embeddings[~is_conditional]
-            uncond_input_ids = input_ids[~is_conditional]
-            uncond_attention_mask = attention_mask[~is_conditional]
-            # 不传ring_info
-            logits, _, mu, logvar, _ = model(
-                uncond_embeddings, uncond_attention_mask, uncond_input_ids, None
-            )
-            # 只计算重建和KL loss，ring_loss为0
-            loss, recon_loss, kld_loss, _ = vae_token_loss(
-                logits, uncond_input_ids, mu, logvar, None, None,
-                epoch, pad_token_id
-            )
-            uncond_loss = loss
-            uncond_recon = recon_loss
-            uncond_kld = kld_loss
-        # 合并loss
-        total_loss = cond_loss + uncond_loss
-        total_recon_loss = cond_recon + uncond_recon
-        total_kld_loss = cond_kld + uncond_kld
-        total_ring_loss = cond_ring  # 只统计有条件样本的ring_loss
-        # 反向传播
+        # 直接全部作为条件VAE处理
+        logits, _, mu, logvar, ring_pred = model(
+            embeddings, attention_mask, input_ids, ring_info
+        )
+        loss, recon_loss, kld_loss, ring_loss = vae_token_loss(
+            logits, input_ids, mu, logvar, ring_pred, ring_info, epoch, pad_token_id
+        )
         optimizer.zero_grad()
-        total_loss.backward()
-        # 梯度裁剪
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)  # 暂时注释，防止NameError
+        loss.backward()
         optimizer.step()
         # 累加损失
-        sum_loss += total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
-        sum_recon_loss += total_recon_loss.item() if isinstance(total_recon_loss, torch.Tensor) else total_recon_loss
-        sum_kld_loss += total_kld_loss.item() if isinstance(total_kld_loss, torch.Tensor) else total_kld_loss
-        sum_ring_loss += total_ring_loss.item() if isinstance(total_ring_loss, torch.Tensor) else total_ring_loss
+        sum_loss += loss.item() if isinstance(loss, torch.Tensor) else loss
+        sum_recon_loss += recon_loss.item() if isinstance(recon_loss, torch.Tensor) else recon_loss
+        sum_kld_loss += kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss
+        sum_ring_loss += ring_loss.item() if isinstance(ring_loss, torch.Tensor) else ring_loss
         
         # 打印进度
         if batch_idx % 10 == 0:
             print(f'Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} '
                   f'({100. * batch_idx / len(train_loader):.0f}%)]\t'
-                  f'Loss: {total_loss.item():.6f}')
+                  f'Loss: {loss.item():.6f}')
     
     # 计算平均损失
     avg_loss = sum_loss / len(train_loader)
@@ -267,50 +216,17 @@ def validate(
                 print(f"input_ids min: {input_ids.min().item()}, max: {input_ids.max().item()}")
                 print(f"ring_info min: {ring_info.min().item()}, max: {ring_info.max().item()}")
                 continue
-            is_conditional = (ring_info >= 2) & (ring_info <= 5)
-            # 有条件样本
-            cond_loss = cond_recon = cond_kld = cond_ring = 0.0
-            if is_conditional.any():
-                cond_embeddings = embeddings[is_conditional]
-                cond_input_ids = input_ids[is_conditional]
-                cond_attention_mask = attention_mask[is_conditional]
-                cond_ring_info = ring_info[is_conditional] - 2
-                logits, _, mu, logvar, ring_pred = model(
-                    cond_embeddings, cond_attention_mask, cond_input_ids, cond_ring_info
-                )
-                loss, recon_loss, kl_loss, ring_loss = vae_token_loss(
-                    logits, cond_input_ids, mu, logvar, ring_pred, cond_ring_info,
-                    epoch=0, pad_token_id=pad_token_id
-                )
-                cond_loss = loss
-                cond_recon = recon_loss
-                cond_kld = kl_loss
-                cond_ring = ring_loss
-            # 无条件样本
-            uncond_loss = uncond_recon = uncond_kld = 0.0
-            if (~is_conditional).any():
-                uncond_embeddings = embeddings[~is_conditional]
-                uncond_input_ids = input_ids[~is_conditional]
-                uncond_attention_mask = attention_mask[~is_conditional]
-                logits, _, mu, logvar, _ = model(
-                    uncond_embeddings, uncond_attention_mask, uncond_input_ids, None
-                )
-                loss, recon_loss, kl_loss, _ = vae_token_loss(
-                    logits, uncond_input_ids, mu, logvar, None, None,
-                    epoch=0, pad_token_id=pad_token_id
-                )
-                uncond_loss = loss
-                uncond_recon = recon_loss
-                uncond_kld = kl_loss
-            # 合并loss
-            batch_loss = cond_loss + uncond_loss
-            batch_recon = cond_recon + uncond_recon
-            batch_kld = cond_kld + uncond_kld
-            batch_ring = cond_ring  # 只统计有条件样本的ring_loss
-            total_loss += batch_loss.item() if isinstance(batch_loss, torch.Tensor) else batch_loss
-            total_recon_loss += batch_recon.item() if isinstance(batch_recon, torch.Tensor) else batch_recon
-            total_kld_loss += batch_kld.item() if isinstance(batch_kld, torch.Tensor) else batch_kld
-            total_ring_loss += batch_ring.item() if isinstance(batch_ring, torch.Tensor) else batch_ring
+            # 直接全部作为条件VAE处理
+            logits, _, mu, logvar, ring_pred = model(
+                embeddings, attention_mask, input_ids, ring_info
+            )
+            loss, recon_loss, kld_loss, ring_loss = vae_token_loss(
+                logits, input_ids, mu, logvar, ring_pred, ring_info, epoch=0, pad_token_id=pad_token_id
+            )
+            total_loss += loss.item() if isinstance(loss, torch.Tensor) else loss
+            total_recon_loss += recon_loss.item() if isinstance(recon_loss, torch.Tensor) else recon_loss
+            total_kld_loss += kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss
+            total_ring_loss += ring_loss.item() if isinstance(ring_loss, torch.Tensor) else ring_loss
     num_batches = len(val_loader)
     avg_loss = total_loss / num_batches
     avg_recon_loss = total_recon_loss / num_batches
@@ -446,7 +362,7 @@ def main(args=None):
         pad_token_id=pad_token_id,
         use_layer_norm=True,
         dropout=args.dropout,
-        num_classes=6  # 环数分类类别数（2~7）
+        num_classes=8  # 改为8，等于最大环数
     ).to(device)
     
     # 初始化优化器
@@ -467,8 +383,9 @@ def main(args=None):
     
     # 训练循环
     best_val_loss = float('inf')
+    epochs_no_improve = 0  # 记录val_loss未提升的轮数
     for epoch in range(args.epochs):
-        beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS)
+        beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS, warmup_epochs=WARMUP_EPOCHS)
         print(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
         logging.info(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
         
@@ -519,6 +436,7 @@ def main(args=None):
         # 保存最佳模型
         if val_losses['loss'] < best_val_loss:
             best_val_loss = val_losses['loss']
+            epochs_no_improve = 0
             save_checkpoint(
                 model=model,
                 optimizer=optimizer,
@@ -527,7 +445,14 @@ def main(args=None):
                 checkpoint_dir=args.checkpoint_dir,
                 is_best=True  # 标记为最佳模型
             )
-            
+        else:
+            epochs_no_improve += 1
+        # 早停判断
+        if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
+            print(f"早停：val_loss在{EARLY_STOPPING_PATIENCE}个epoch内未提升，提前停止训练。")
+            logging.info(f"早停：val_loss在{EARLY_STOPPING_PATIENCE}个epoch内未提升，提前停止训练。")
+            break
+        
         # 检查潜在空间是否被过度压缩
         if train_losses['recon_loss'] < 0.1:  # 如果recon_loss过小
             logging.warning(

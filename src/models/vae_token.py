@@ -11,7 +11,9 @@ from config.config import (
     get_beta,
     MAX_BETA,
     ANNEALING_EPOCHS,
-    KLD_TARGET
+    KLD_TARGET,
+    KLD_FLOOR,
+    KLD_TARGET_WEIGHT
 )
 
 class ESMVAEToken(nn.Module):
@@ -82,7 +84,7 @@ class ESMVAEToken(nn.Module):
         self.latent_to_rnn_hidden = nn.Linear(latent_dim + ring_embedding_dim, rnn_hidden_dim * num_rnn_layers)
         self.decoder_embedding = nn.Embedding(vocab_size, rnn_hidden_dim)
         self.decoder_rnn = nn.GRU(
-            input_size=rnn_hidden_dim,
+            input_size=rnn_hidden_dim + ring_embedding_dim,
             hidden_size=rnn_hidden_dim,
             num_layers=num_rnn_layers,
             batch_first=True,
@@ -215,71 +217,48 @@ class ESMVAEToken(nn.Module):
         """
         batch_size = z.size(0)
         device = z.device
-        
         # 编码环数信息
         if ring_info is not None:
-            # 确保ring_info和z在同一设备上
             if ring_info.device != z.device:
                 ring_info = ring_info.to(z.device)
-            ring_embedding = self.encode_ring_info(ring_info)
+            ring_embedding = self.encode_ring_info(ring_info)  # [batch, ring_emb_dim]
         else:
-            # 无条件时拼接全零embedding
             ring_embedding = torch.zeros(z.size(0), self.ring_embedding_dim, device=z.device)
-        # 将潜在向量和环数嵌入连接
+        # 拼接z和ring_embedding初始化RNN隐藏状态
         z = torch.cat([z, ring_embedding], dim=-1)
-        
-        # 准备RNN初始隐藏状态
-        h0 = self.latent_to_rnn_hidden(z)  # [batch_size, rnn_hidden_dim * num_layers]
+        h0 = self.latent_to_rnn_hidden(z)
         h0 = h0.view(self.num_rnn_layers, batch_size, self.rnn_hidden_dim)
-        
         if target_ids is not None:
-            # 验证target_ids的维度
-            if target_ids.dim() != 2:
-                raise ValueError(f"target_ids必须是2维的 [batch_size, seq_len]，但收到了 {target_ids.shape}")
-            
-            # --- Teacher Forcing ---
-            decoder_input_ids = target_ids[:, :-1]  # [batch_size, max_seq_len - 1]
+            # Teacher Forcing
+            decoder_input_ids = target_ids[:, :-1]
             sos_tokens = torch.full((batch_size, 1), self.sos_token_id, device=device)
             decoder_input_ids = torch.cat([sos_tokens, decoder_input_ids], dim=1)
-            
-            decoder_inputs = self.decoder_embedding(decoder_input_ids)
+            decoder_inputs = self.decoder_embedding(decoder_input_ids)  # [batch, seq_len, emb_dim]
+            cond_emb = ring_embedding.unsqueeze(1).repeat(1, decoder_inputs.size(1), 1)  # [batch, seq_len, ring_emb_dim]
+            decoder_inputs = torch.cat([decoder_inputs, cond_emb], dim=-1)  # [batch, seq_len, emb+cond]
             rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
             logits = self.fc_out(rnn_outputs)
             return logits
         else:
-            # --- Autoregressive Generation ---
+            # Autoregressive Generation
             output_sequence = torch.full(
                 (batch_size, self.max_sequence_length),
                 self.pad_token_id,
                 device=device
             )
-            
-            # 设置起始token
             output_sequence[:, 0] = self.sos_token_id
-            
-            # 自回归生成
             for t in range(1, self.max_sequence_length):
-                # 获取当前输入
                 current_input = output_sequence[:, :t]
                 decoder_inputs = self.decoder_embedding(current_input)
-                
-                # 运行RNN
+                cond_emb = ring_embedding.unsqueeze(1).repeat(1, decoder_inputs.size(1), 1)
+                decoder_inputs = torch.cat([decoder_inputs, cond_emb], dim=-1)
                 rnn_output, h0 = self.decoder_rnn(decoder_inputs, h0)
-                
-                # 获取最后一个时间步的输出
                 last_output = rnn_output[:, -1]
-                
-                # 预测下一个token
                 logits = self.fc_out(last_output)
                 next_token = torch.argmax(logits, dim=-1)
-                
-                # 更新序列
                 output_sequence[:, t] = next_token
-                
-                # 如果生成了结束token，提前结束
                 if (next_token == self.eos_token_id).all():
                     break
-            
             return output_sequence
     
     def forward(
@@ -369,7 +348,8 @@ def vae_token_loss(
     # 计算beta值
     beta = get_beta(epoch, max_beta, annealing_epochs)
     
-    # 计算总损失
-    total_loss = recon_loss + beta * kld_loss + ring_loss
+    # KL target loss软约束
+    kld_target_component = KLD_TARGET_WEIGHT * (kld_loss - KLD_TARGET) ** 2
+    total_loss = recon_loss + beta * kld_loss + kld_target_component + ring_loss
     
     return total_loss, recon_loss, kld_loss, ring_loss 
