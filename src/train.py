@@ -64,10 +64,7 @@ def vae_token_loss(
     ring_pred: torch.Tensor,
     ring_info: torch.Tensor,
     epoch: int,
-    pad_token_id: int = 1,
-    max_beta: float = MAX_BETA,  # 使用配置文件中的值
-    annealing_epochs: int = ANNEALING_EPOCHS,  # 使用配置文件中的值
-    kld_target: float = KLD_TARGET  # 使用配置文件中的值
+    pad_token_id: int = 1
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """计算VAE的损失，使用Free Bits策略
     
@@ -80,28 +77,20 @@ def vae_token_loss(
         ring_info: 环数信息
         epoch: 当前epoch
         pad_token_id: padding token的ID
-        max_beta: KL散度的最大权重
-        annealing_epochs: beta退火的周期数
-        kld_target: 目标KLD下限K，单位是nats
-        
     Returns:
         (总损失, 重建损失, KL损失, 环数损失)
     """
-    beta = get_beta(epoch, max_beta=max_beta, annealing_epochs=annealing_epochs)
-    
+    beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS)
     # 计算重建损失（交叉熵）
     recon_loss = nn.CrossEntropyLoss(reduction='mean', ignore_index=pad_token_id)(
         recon_logits.view(-1, recon_logits.size(-1)),
         input_ids.view(-1)
     )
-    
-    # 对logvar进行clip，防止极端值
-    logvar = torch.clamp(logvar, min=-10, max=10)
-    kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
-    # 对kl_loss进行clip并用log KL loss
-    kl_loss_clipped = torch.clamp(kl_loss, 0, 20)
-    loss = recon_loss + beta * torch.log(1 + torch.abs(kl_loss_clipped - kld_target))
-    
+    # KL散度（标准写法，先sum后mean）
+    kl_per_sample = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)
+    kl_loss = kl_per_sample.mean()
+    # 总损失
+    loss = recon_loss + beta * kl_loss
     # 计算环数损失（仅有条件时）
     if ring_pred is not None and ring_info is not None:
         ring_info = ring_info.long()
@@ -110,7 +99,6 @@ def vae_token_loss(
         ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info)
     else:
         ring_loss = torch.tensor(0.0, device=recon_logits.device)
-    
     return loss, recon_loss, kl_loss, ring_loss
 
 def train_epoch(
@@ -119,9 +107,7 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     device: torch.device,
-    pad_token_id: int,
-    max_beta: float = 1.0,
-    annealing_epochs: int = 10
+    pad_token_id: int
 ) -> Dict[str, float]:
     """训练一个epoch
     
@@ -132,8 +118,6 @@ def train_epoch(
         epoch: 当前训练轮次
         device: 训练设备
         pad_token_id: padding token的ID
-        max_beta: KL散度的最大权重
-        annealing_epochs: beta值达到最大值的轮次数
         
     Returns:
         包含训练损失的字典
@@ -179,7 +163,7 @@ def train_epoch(
             )
             loss, recon_loss, kld_loss, ring_loss = vae_token_loss(
                 logits, cond_input_ids, mu, logvar, ring_pred, cond_ring_info,
-                epoch, pad_token_id, max_beta, annealing_epochs
+                epoch, pad_token_id
             )
             cond_loss = loss
             cond_recon = recon_loss
@@ -198,7 +182,7 @@ def train_epoch(
             # 只计算重建和KL loss，ring_loss为0
             loss, recon_loss, kld_loss, _ = vae_token_loss(
                 logits, uncond_input_ids, mu, logvar, None, None,
-                epoch, pad_token_id, max_beta, annealing_epochs
+                epoch, pad_token_id
             )
             uncond_loss = loss
             uncond_recon = recon_loss

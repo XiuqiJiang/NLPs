@@ -115,10 +115,7 @@ class VAETrainer:
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         target_token_ids: torch.Tensor,
-        epoch: int,  # 添加epoch参数
-        max_beta: float = MAX_BETA,  # 使用配置文件中的值
-        annealing_epochs: int = ANNEALING_EPOCHS,  # 使用配置文件中的值
-        kld_target: float = KLD_TARGET  # 使用配置文件中的值
+        epoch: int
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """计算 VAE 损失，使用Free Bits策略
         
@@ -127,15 +124,12 @@ class VAETrainer:
             attention_mask: 注意力掩码
             target_token_ids: 目标token ids
             epoch: 当前epoch
-            max_beta: KL散度的最大权重
-            annealing_epochs: beta退火的周期数
-            kld_target: 目标KLD下限K，单位是nats
             
         Returns:
             (总损失, 损失字典)
         """
-        # 计算当前epoch的beta值，使用传入的参数
-        beta = get_beta(epoch, max_beta=max_beta, annealing_epochs=annealing_epochs)
+        # 计算当前epoch的beta值，使用config.py全局变量
+        beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS)
         
         # 编码
         mu, logvar = self.model.encode(x)
@@ -157,7 +151,9 @@ class VAETrainer:
         )
         
         # 计算KL散度
-        kl_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        # mu, logvar: [batch, latent_dim]
+        kl_per_sample = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1)  # [batch]
+        kl_loss = kl_per_sample.mean()  # 标量
         
         # 直接使用原始KL损失
         total_loss = recon_loss + beta * kl_loss
@@ -169,24 +165,20 @@ class VAETrainer:
             'beta': beta
         }
         
+        print(f"mu mean: {mu.mean().item():.4f}, logvar mean: {logvar.mean().item():.4f}, kl_loss: {kl_loss.item():.4f}")
+        
         return total_loss, loss_dict
     
     def _train_epoch(
         self,
         train_loader: DataLoader,
-        epoch: int,
-        max_beta: float = MAX_BETA,  # 使用配置文件中的值
-        annealing_epochs: int = ANNEALING_EPOCHS,  # 使用配置文件中的值
-        kld_target: float = KLD_TARGET  # 使用配置文件中的值
+        epoch: int
     ) -> Dict[str, float]:
         """训练一个epoch
         
         Args:
             train_loader: 训练数据加载器
             epoch: 当前epoch
-            max_beta: KL散度的最大权重
-            annealing_epochs: beta退火的周期数
-            kld_target: 目标KLD下限K，单位是nats
             
         Returns:
             包含训练指标的字典
@@ -222,10 +214,7 @@ class VAETrainer:
                 batch['embeddings'],
                 batch['attention_mask'],
                 batch['token_ids'],
-                epoch,
-                max_beta=max_beta,
-                annealing_epochs=annealing_epochs,
-                kld_target=kld_target
+                epoch
             )
             
             self.optimizer.zero_grad()
@@ -379,10 +368,7 @@ class VAETrainer:
                     batch['embeddings'],
                     batch['attention_mask'],
                     batch['token_ids'],
-                    -1,  # 使用-1表示验证集
-                    max_beta=MAX_BETA,  # 使用配置文件中的值
-                    annealing_epochs=ANNEALING_EPOCHS,  # 使用配置文件中的值
-                    kld_target=KLD_TARGET  # 使用配置文件中的值
+                    -1
                 )
                 
                 # 更新统计信息
