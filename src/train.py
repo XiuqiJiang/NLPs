@@ -95,11 +95,12 @@ def vae_token_loss(
         input_ids.view(-1)
     )
     
-    # 计算KL散度
+    # 对logvar进行clip，防止极端值
+    logvar = torch.clamp(logvar, min=-10, max=10)
     kl_loss = -0.5 * torch.mean(1 + logvar - mean.pow(2) - logvar.exp())
-    
-    # KL target loss
-    loss = recon_loss + beta * torch.abs(kl_loss - kld_target)
+    # 对kl_loss进行clip并用log KL loss
+    kl_loss_clipped = torch.clamp(kl_loss, 0, 20)
+    loss = recon_loss + beta * torch.log(1 + torch.abs(kl_loss_clipped - kld_target))
     
     # 计算环数损失（仅有条件时）
     if ring_pred is not None and ring_info is not None:
