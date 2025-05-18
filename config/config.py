@@ -44,8 +44,8 @@ LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
 # VAE训练参数
-MAX_BETA = 0.05  # KL散度的最大权重，调高
-ANNEALING_EPOCHS = 200  # 退火周期，调大
+MAX_BETA = 0.01  # KL散度的最大权重，调回较小值
+ANNEALING_EPOCHS = 200  # 退火周期
 KLD_TARGET = 0.0
 
 def get_beta(epoch: int, max_beta: float = MAX_BETA, annealing_epochs: int = ANNEALING_EPOCHS) -> float:
@@ -59,7 +59,7 @@ def get_beta(epoch: int, max_beta: float = MAX_BETA, annealing_epochs: int = ANN
     Returns:
         beta值，范围从0到max_beta
     """
-    warmup_epochs = 60  # 预热期epoch数，调大
+    warmup_epochs = 60  # 预热期epoch数
     annealing_epochs_after_warmup = annealing_epochs - warmup_epochs
     
     if epoch < warmup_epochs:
