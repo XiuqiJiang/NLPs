@@ -31,7 +31,7 @@ class ESMVAEToken(nn.Module):
         rnn_hidden_dim: int = 256,
         num_rnn_layers: int = 1,
         ring_embedding_dim: int = 32,  # 添加环数嵌入维度
-        num_classes: int = 8           # 修改默认值为8，对应1-8个C
+        num_classes: int = 9           # 修改默认值为9，对应0-8个C
     ):
         """初始化VAE模型
         
@@ -47,7 +47,7 @@ class ESMVAEToken(nn.Module):
             rnn_hidden_dim: RNN隐藏层维度
             num_rnn_layers: RNN层数
             ring_embedding_dim: 环数嵌入维度
-            num_classes: 环数分类类别数（1-8个C，共8类）
+            num_classes: 环数分类类别数（0-8个C，共9类）
         """
         super().__init__()
         self.input_dim = input_dim

@@ -69,7 +69,7 @@ def load_model(model_path: str) -> tuple[ESMVAEToken, AutoTokenizer]:
         pad_token_id=tokenizer.pad_token_id,
         use_layer_norm=True,
         dropout=0.1,
-        num_classes=8  # 保证与训练时一致
+        num_classes=9  # 保证与训练时一致
     ).to(DEVICE)
     
     # 加载模型权重
