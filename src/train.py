@@ -51,10 +51,10 @@ from config.config import (
     SEQUENCE_FILE,
     get_beta,
     MAX_BETA,
-    ANNEALING_EPOCHS,
     KLD_TARGET,
-    WARMUP_EPOCHS
-    )
+    WARMUP_EPOCHS,
+    KLD_FLOOR
+)
 from src.utils.ring_utils import get_ring_info, analyze_ring_distribution
 
 def vae_token_loss(
@@ -81,7 +81,7 @@ def vae_token_loss(
     Returns:
         (总损失, 重建损失, KL损失, 环数损失)
     """
-    beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS, warmup_epochs=WARMUP_EPOCHS)
+    beta = get_beta(epoch, max_beta=MAX_BETA, warmup_epochs=WARMUP_EPOCHS)
     # 计算重建损失（交叉熵）
     recon_loss = nn.CrossEntropyLoss(reduction='mean', ignore_index=pad_token_id)(
         recon_logits.view(-1, recon_logits.size(-1)),
@@ -90,6 +90,10 @@ def vae_token_loss(
     # KL散度（标准写法，先sum后mean）
     kl_per_sample = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)
     kl_loss = kl_per_sample.mean()
+    
+    # 应用KLD floor
+    kl_loss = torch.clamp(kl_loss, min=KLD_FLOOR)
+    
     # 总损失
     loss = recon_loss + beta * kl_loss
     # 计算环数损失（仅有条件时）
@@ -385,7 +389,7 @@ def main(args=None):
     best_val_loss = float('inf')
     epochs_no_improve = 0  # 记录val_loss未提升的轮数
     for epoch in range(args.epochs):
-        beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS, warmup_epochs=WARMUP_EPOCHS)
+        beta = get_beta(epoch, max_beta=MAX_BETA, warmup_epochs=WARMUP_EPOCHS)
         print(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
         logging.info(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
         

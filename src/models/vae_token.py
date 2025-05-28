@@ -10,7 +10,6 @@ from config.config import (
     ESM_EMBEDDING_DIM,
     get_beta,
     MAX_BETA,
-    ANNEALING_EPOCHS,
     KLD_TARGET,
     KLD_FLOOR,
     KLD_TARGET_WEIGHT

@@ -177,7 +177,7 @@ def generate_sequences_with_rings(
         embeddings = data['embeddings']
     elif isinstance(data, list):
         sequences = [item['sequence'] for item in data]
-        embeddings = [item['embedding'] for item in data]
+        embeddings = [item['embeddings'] for item in data]
         embeddings = torch.stack(embeddings)
     else:
         raise ValueError("未知的数据格式，请检查EMBEDDING_FILE内容！")

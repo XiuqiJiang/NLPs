@@ -129,7 +129,7 @@ class VAETrainer:
             (总损失, 损失字典)
         """
         # 计算当前epoch的beta值，使用config.py全局变量
-        beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=ANNEALING_EPOCHS)
+        beta = get_beta(epoch, max_beta=MAX_BETA, annealing_epochs=WARMUP_EPOCHS)
         
         # 编码
         mu, logvar = self.model.encode(x)
@@ -427,7 +427,7 @@ class VAETrainer:
         self.logger.info(f"从 {path} 加载检查点")
         return checkpoint['epoch']
 
-def get_beta(epoch: int, max_beta: float = 1.0, annealing_epochs: int = ANNEALING_EPOCHS) -> float:
+def get_beta(epoch: int, max_beta: float = 1.0, annealing_epochs: int = WARMUP_EPOCHS) -> float:
     """计算当前epoch的beta值
     
     Args:
