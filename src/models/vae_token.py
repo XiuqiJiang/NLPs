@@ -31,7 +31,7 @@ class ESMVAEToken(nn.Module):
         rnn_hidden_dim: int = 256,
         num_rnn_layers: int = 1,
         ring_embedding_dim: int = 32,  # 添加环数嵌入维度
-        num_classes: int = 6           # 新增类别数参数，默认6
+        num_classes: int = 8           # 修改默认值为8，对应1-8个C
     ):
         """初始化VAE模型
         
@@ -47,7 +47,7 @@ class ESMVAEToken(nn.Module):
             rnn_hidden_dim: RNN隐藏层维度
             num_rnn_layers: RNN层数
             ring_embedding_dim: 环数嵌入维度
-            num_classes: 环数分类类别数（如2~7共6类）
+            num_classes: 环数分类类别数（1-8个C，共8类）
         """
         super().__init__()
         self.input_dim = input_dim
@@ -69,21 +69,14 @@ class ESMVAEToken(nn.Module):
         self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
         self.fc_logvar = nn.Linear(hidden_dims[-1], latent_dim)
         
-        # 环数编码器
-        self.ring_encoder = nn.Sequential(
-            nn.Linear(1, ring_embedding_dim),
-            nn.LayerNorm(ring_embedding_dim),
-            nn.LeakyReLU(),
-            nn.Linear(ring_embedding_dim, ring_embedding_dim),
-            nn.LayerNorm(ring_embedding_dim),
-            nn.LeakyReLU()
-        )
+        # 环数编码器：使用Embedding层直接编码类别
+        self.ring_encoder = nn.Embedding(num_classes, ring_embedding_dim)
         
         # RNN解码器相关层
         self.latent_to_rnn_hidden = nn.Linear(latent_dim + ring_embedding_dim, rnn_hidden_dim * num_rnn_layers)
         self.decoder_embedding = nn.Embedding(vocab_size, rnn_hidden_dim)
         self.decoder_rnn = nn.GRU(
-            input_size=rnn_hidden_dim + ring_embedding_dim,
+            input_size=rnn_hidden_dim + ring_embedding_dim,  # 输入维度是embedding_dim + ring_embedding_dim
             hidden_size=rnn_hidden_dim,
             num_layers=num_rnn_layers,
             batch_first=True,
@@ -91,7 +84,7 @@ class ESMVAEToken(nn.Module):
         )
         self.fc_out = nn.Linear(rnn_hidden_dim, vocab_size)
         
-        # 环数预测器
+        # 环数预测器：输出num_classes个logits
         self.ring_predictor = nn.Sequential(
             nn.Linear(latent_dim, 64),
             nn.LayerNorm(64),
@@ -99,7 +92,7 @@ class ESMVAEToken(nn.Module):
             nn.Linear(64, 32),
             nn.LayerNorm(32),
             nn.LeakyReLU(),
-            nn.Linear(32, num_classes)  # 分类输出
+            nn.Linear(32, num_classes)  # 输出num_classes个logits
         )
         
         # 特殊token IDs
@@ -108,6 +101,16 @@ class ESMVAEToken(nn.Module):
         
         # 初始化权重
         self.apply(self._init_weights)
+        
+        # 打印模型配置
+        print(f"Model configuration:")
+        print(f"- Input dimension: {input_dim}")
+        print(f"- Hidden dimensions: {hidden_dims}")
+        print(f"- Latent dimension: {latent_dim}")
+        print(f"- Vocabulary size: {vocab_size}")
+        print(f"- RNN hidden dimension: {rnn_hidden_dim}")
+        print(f"- Ring embedding dimension: {ring_embedding_dim}")
+        print(f"- Number of classes: {num_classes}")
     
     def build_encoder(self) -> nn.Module:
         """构建编码器网络"""
@@ -193,13 +196,13 @@ class ESMVAEToken(nn.Module):
         """编码环数信息
         
         Args:
-            ring_info: 环数张量 [batch_size]
+            ring_info: 环数张量 [batch_size]，值为0到num_classes-1
             
         Returns:
             环数嵌入 [batch_size, ring_embedding_dim]
         """
-        # 将环数转换为浮点数并添加维度
-        ring_info = ring_info.float().unsqueeze(-1)  # [batch_size, 1]
+        # 确保ring_info是long类型
+        ring_info = ring_info.long()
         return self.ring_encoder(ring_info)
     
     def decode(self, z: torch.Tensor, target_ids: Optional[torch.Tensor] = None, ring_info: Optional[torch.Tensor] = None) -> torch.Tensor:
@@ -216,28 +219,97 @@ class ESMVAEToken(nn.Module):
         """
         batch_size = z.size(0)
         device = z.device
+        
+        # 打印输入维度
+        print(f"Input z shape: {z.shape}")
+        if ring_info is not None:
+            print(f"Input ring_info shape: {ring_info.shape}")
+            print(f"Ring info values: {ring_info}")
+        
         # 编码环数信息
         if ring_info is not None:
             if ring_info.device != z.device:
                 ring_info = ring_info.to(z.device)
-            ring_embedding = self.encode_ring_info(ring_info)  # [batch, ring_emb_dim]
+            # 确保ring_info是long类型
+            ring_info = ring_info.long()
+            # 检查ring_info的值范围
+            if ring_info.min() < 0 or ring_info.max() >= self.num_classes:
+                raise ValueError(f"ring_info的值必须在[0, {self.num_classes-1}]范围内，但实际范围是[{ring_info.min()}, {ring_info.max()}]")
+            ring_embedding = self.ring_encoder(ring_info)  # [batch, ring_emb_dim]
         else:
             ring_embedding = torch.zeros(z.size(0), self.ring_embedding_dim, device=z.device)
+        
+        print(f"Ring embedding shape: {ring_embedding.shape}")
+        
+        # 检查z和ring_embedding的维度
+        if z.size(0) != ring_embedding.size(0):
+            raise ValueError(f"批次大小不匹配: z={z.size(0)}, ring_embedding={ring_embedding.size(0)}")
+        
         # 拼接z和ring_embedding初始化RNN隐藏状态
-        z = torch.cat([z, ring_embedding], dim=-1)
+        try:
+            z = torch.cat([z, ring_embedding], dim=-1)
+            print(f"Concatenated z shape: {z.shape}")
+        except RuntimeError as e:
+            print(f"拼接错误: z shape={z.shape}, ring_embedding shape={ring_embedding.shape}")
+            raise
+        
         h0 = self.latent_to_rnn_hidden(z)
         h0 = h0.view(self.num_rnn_layers, batch_size, self.rnn_hidden_dim)
+        print(f"Initial hidden state shape: {h0.shape}")
+        
         if target_ids is not None:
             # Teacher Forcing
+            # 确保序列长度一致
+            seq_length = target_ids.size(1)
+            if seq_length > self.max_sequence_length:
+                target_ids = target_ids[:, :self.max_sequence_length]
+                seq_length = self.max_sequence_length
+            
             decoder_input_ids = target_ids[:, :-1]
             sos_tokens = torch.full((batch_size, 1), self.sos_token_id, device=device)
             decoder_input_ids = torch.cat([sos_tokens, decoder_input_ids], dim=1)
+            
+            # 打印调试信息
+            print(f"decoder_input_ids shape: {decoder_input_ids.shape}")
+            
+            # 检查输入是否包含无效值
+            if torch.isnan(decoder_input_ids).any() or torch.isinf(decoder_input_ids.float()).any():
+                raise ValueError("输入包含 NaN 或 Inf 值")
+            
             decoder_inputs = self.decoder_embedding(decoder_input_ids)  # [batch, seq_len, emb_dim]
+            print(f"decoder_inputs shape: {decoder_inputs.shape}")
+            
             cond_emb = ring_embedding.unsqueeze(1).repeat(1, decoder_inputs.size(1), 1)  # [batch, seq_len, ring_emb_dim]
+            print(f"cond_emb shape: {cond_emb.shape}")
+            
             decoder_inputs = torch.cat([decoder_inputs, cond_emb], dim=-1)  # [batch, seq_len, emb+cond]
-            rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
-            logits = self.fc_out(rnn_outputs)
-            return logits
+            print(f"concatenated decoder_inputs shape: {decoder_inputs.shape}")
+            
+            # 检查输入是否包含无效值
+            if torch.isnan(decoder_inputs).any() or torch.isinf(decoder_inputs).any():
+                raise ValueError("拼接后的输入包含 NaN 或 Inf 值")
+            
+            try:
+                # 使用pack_padded_sequence处理变长序列
+                rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
+                print(f"rnn_outputs shape: {rnn_outputs.shape}")
+                
+                # 检查RNN输出是否包含无效值
+                if torch.isnan(rnn_outputs).any() or torch.isinf(rnn_outputs).any():
+                    raise ValueError("RNN输出包含 NaN 或 Inf 值")
+                
+                # 检查fc_out层的输入维度
+                print(f"fc_out input shape: {rnn_outputs.shape[-1]}, expected: {self.rnn_hidden_dim}")
+                print(f"fc_out output shape: {self.vocab_size}")
+                
+                logits = self.fc_out(rnn_outputs)
+                print(f"output logits shape: {logits.shape}")
+                return logits
+            except RuntimeError as e:
+                print(f"RNN前向传播错误: {str(e)}")
+                print(f"输入形状: {decoder_inputs.shape}")
+                print(f"隐藏状态形状: {h0.shape}")
+                raise
         else:
             # Autoregressive Generation
             output_sequence = torch.full(
@@ -246,18 +318,27 @@ class ESMVAEToken(nn.Module):
                 device=device
             )
             output_sequence[:, 0] = self.sos_token_id
+            
             for t in range(1, self.max_sequence_length):
                 current_input = output_sequence[:, :t]
                 decoder_inputs = self.decoder_embedding(current_input)
                 cond_emb = ring_embedding.unsqueeze(1).repeat(1, decoder_inputs.size(1), 1)
                 decoder_inputs = torch.cat([decoder_inputs, cond_emb], dim=-1)
-                rnn_output, h0 = self.decoder_rnn(decoder_inputs, h0)
-                last_output = rnn_output[:, -1]
-                logits = self.fc_out(last_output)
-                next_token = torch.argmax(logits, dim=-1)
-                output_sequence[:, t] = next_token
-                if (next_token == self.eos_token_id).all():
-                    break
+                
+                try:
+                    rnn_output, h0 = self.decoder_rnn(decoder_inputs, h0)
+                    last_output = rnn_output[:, -1]
+                    logits = self.fc_out(last_output)
+                    next_token = torch.argmax(logits, dim=-1)
+                    output_sequence[:, t] = next_token
+                    if (next_token == self.eos_token_id).all():
+                        break
+                except RuntimeError as e:
+                    print(f"生成步骤 {t} 错误: {str(e)}")
+                    print(f"当前输入形状: {decoder_inputs.shape}")
+                    print(f"隐藏状态形状: {h0.shape}")
+                    raise
+            
             return output_sequence
     
     def forward(

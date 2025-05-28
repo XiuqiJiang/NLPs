@@ -159,12 +159,25 @@ def generate_sequences_with_rings(
     model: ESMVAEToken,
     tokenizer: AutoTokenizer,
     num_sequences: int,
-    target_rings: int,
+    target_rings: int,  # 实际目标C数量
     temperature: float = 1.0,
     max_length: int = MAX_SEQUENCE_LENGTH,
     device: str = DEVICE
 ) -> List[str]:
-    """生成指定环数的序列"""
+    """生成指定环数的序列
+    
+    Args:
+        model: VAE模型
+        tokenizer: tokenizer
+        num_sequences: 要生成的序列数量
+        target_rings: 实际目标半胱氨酸数量
+        temperature: 采样温度
+        max_length: 最大序列长度
+        device: 设备
+        
+    Returns:
+        生成的序列列表
+    """
     model.eval()
     generated_sequences = []
     logger = logging.getLogger(__name__)
@@ -206,8 +219,8 @@ def generate_sequences_with_rings(
         pin_memory=pin_memory
     )
     
-    # 收集三环序列的潜在向量
-    three_ring_vectors = []
+    # 收集目标C数量序列的潜在向量
+    target_ring_vectors = []
     total_sequences = 0
     sequences_with_target_rings = 0
     
@@ -230,24 +243,24 @@ def generate_sequences_with_rings(
                 cysteine_count = sequence.count('C')
                 if cysteine_count == target_rings:
                     sequences_with_target_rings += 1
-                    three_ring_vectors.append(mu[i].cpu())
+                    target_ring_vectors.append(mu[i].cpu())
                     if sequences_with_target_rings <= 5:  # 只打印前5个匹配的序列
-                        logger.info(f"找到匹配序列 {sequences_with_target_rings}: {sequence} (环数: {cysteine_count})")
+                        logger.info(f"找到匹配序列 {sequences_with_target_rings}: {sequence} (C数量: {cysteine_count})")
     
     logger.info(f"总共处理了 {total_sequences} 个序列")
-    logger.info(f"其中包含 {target_rings} 个环的序列有 {sequences_with_target_rings} 个")
+    logger.info(f"其中包含 {target_rings} 个C的序列有 {sequences_with_target_rings} 个")
     
-    if len(three_ring_vectors) == 0:
-        logger.warning(f"在训练数据中没有找到具有 {target_rings} 个环的序列，将使用随机采样")
+    if len(target_ring_vectors) == 0:
+        logger.warning(f"在训练数据中没有找到具有 {target_rings} 个C的序列，将使用随机采样")
         z = torch.randn(num_sequences, model.latent_dim, device=device)
     else:
-        # 计算三环序列潜在向量的均值和标准差
-        three_ring_vectors = torch.stack(three_ring_vectors)
-        mean = three_ring_vectors.mean(dim=0).to(device)  # 移动到正确的设备
-        std = three_ring_vectors.std(dim=0).to(device)    # 移动到正确的设备
+        # 计算目标C数量序列潜在向量的均值和标准差
+        target_ring_vectors = torch.stack(target_ring_vectors)
+        mean = target_ring_vectors.mean(dim=0).to(device)  # 移动到正确的设备
+        std = target_ring_vectors.std(dim=0).to(device)    # 移动到正确的设备
         
-        # 在三环序列的潜在空间区域采样
-        logger.info(f"在三环序列的潜在空间区域采样 (均值: {mean.mean():.3f}, 标准差: {std.mean():.3f})")
+        # 在目标C数量序列的潜在空间区域采样
+        logger.info(f"在{target_rings}个C序列的潜在空间区域采样 (均值: {mean.mean():.3f}, 标准差: {std.mean():.3f})")
         logger.info(f"潜在向量维度: {mean.shape}")
         
         # 生成多个批次，增加采样多样性
@@ -258,8 +271,10 @@ def generate_sequences_with_rings(
         z = torch.cat(all_z, dim=0)  # 合并所有批次
         logger.info(f"总共采样了 {z.shape[0]} 个潜在向量")
     
-    # 创建条件向量（环数）
-    condition = torch.full((z.shape[0],), target_rings, device=device)
+    # 创建条件向量（将实际C数量转换为模型内部标签）
+    decoder_label = target_rings - 1  # 转换为模型内部标签
+    condition = torch.full((z.shape[0],), decoder_label, device=device)
+    logger.info(f"为解码器设置的条件标签: {decoder_label} (对应目标 {target_rings}个C)")
     
     # 解码（使用自回归模式，加入条件）
     logger.info("开始解码生成序列...")
@@ -284,7 +299,7 @@ def generate_sequences_with_rings(
             valid_sequences.append(sequence)
             logger.info(f"\n生成的序列 {len(valid_sequences)}:")
             logger.info(sequence)
-            logger.info(f"环数: {cysteine_count}")
+            logger.info(f"C数量: {cysteine_count}")
     logger.info(f"采样到的C数量分布: {c_count_stat}")
     logger.info(f"第一轮生成了 {total_generated} 个序列，其中 {len(valid_sequences)} 个C数在[{target_rings-1},{target_rings+1}]范围内")
     
@@ -296,8 +311,8 @@ def generate_sequences_with_rings(
         generation_attempts += 1
         logger.info(f"\n第 {generation_attempts} 次尝试生成序列...")
         
-        # 在三环序列的潜在空间区域采样
-        if len(three_ring_vectors) > 0:
+        # 在目标C数量序列的潜在空间区域采样
+        if len(target_ring_vectors) > 0:
             # 生成多个批次，增加采样多样性
             all_z = []
             for _ in range(5):  # 生成5个批次
@@ -307,8 +322,9 @@ def generate_sequences_with_rings(
         else:
             z = torch.randn(num_sequences, model.latent_dim, device=device)
         
-        # 创建条件向量（环数）
-        condition = torch.full((z.shape[0],), target_rings, device=device)
+        # 创建条件向量（将实际C数量转换为模型内部标签）
+        decoder_label = target_rings - 1  # 转换为模型内部标签
+        condition = torch.full((z.shape[0],), decoder_label, device=device)
         
         # 解码
         with torch.no_grad():
@@ -330,7 +346,7 @@ def generate_sequences_with_rings(
                 batch_valid += 1
                 logger.info(f"\n生成的序列 {len(valid_sequences)}:")
                 logger.info(sequence)
-                logger.info(f"环数: {cysteine_count}")
+                logger.info(f"C数量: {cysteine_count}")
                 
                 if len(valid_sequences) >= num_sequences:
                     break
@@ -395,7 +411,7 @@ def main():
     parser = argparse.ArgumentParser(description="蛋白质VAE序列生成")
     parser.add_argument('--model_path', type=str, required=True, help='模型权重路径')
     parser.add_argument('--num_sequences', type=int, default=100, help='生成序列数量')
-    parser.add_argument('--ring_info', type=int, default=2, help='目标环数类别（如3环就填2，需与训练映射一致）')
+    parser.add_argument('--target_c_count', type=int, default=3, help='实际目标半胱氨酸数量 (例如: 填3代表希望生成3个C的序列)')
     parser.add_argument('--temperature', type=float, default=1.0, help='采样温度')
     parser.add_argument('--global_sample', action='store_true', help='是否启用全局采样模式')
     args = parser.parse_args()
@@ -412,12 +428,14 @@ def main():
     model, tokenizer = load_model(model_path)
     
     if args.global_sample:
-        print(f"[全局采样] 采样{args.num_sequences}条，环数类别={args.ring_info}")
+        # 将实际C数量转换为模型内部标签（减1）
+        decoder_label = args.target_c_count - 1
+        print(f"[全局采样] 采样{args.num_sequences}条，目标C数量={args.target_c_count}，解码器标签={decoder_label}")
         samples = global_sample_sequences(
             model,
             tokenizer,
             num_sequences=args.num_sequences,
-            ring_info_value=args.ring_info,
+            ring_info_value=decoder_label,  # 使用转换后的标签
             temperature=args.temperature,
             device=DEVICE
         )
@@ -427,23 +445,23 @@ def main():
         return
 
     # 支持多个环数批量生成，局部高斯采样
-    ring_list = [args.ring_info]
+    target_c_counts = [args.target_c_count]
 
-    for ring in ring_list:
-        logger.info(f"\n=== 目标环数: {ring} ===")
+    for target_c in target_c_counts:
+        logger.info(f"\n=== 目标C数量: {target_c} ===")
         sequences = generate_sequences_with_rings(
             model=model,
             tokenizer=tokenizer,
             num_sequences=args.num_sequences,
-            target_rings=ring,
+            target_rings=target_c,  # 直接使用实际C数量
             temperature=args.temperature,
             max_length=MAX_SEQUENCE_LENGTH,
             device=DEVICE
         )
         unique_seqs = set(sequences)
-        logger.info(f"目标环数{ring}: 采样{args.num_sequences}次，unique序列数: {len(unique_seqs)}，unique比例: {len(unique_seqs)/args.num_sequences:.2f}")
+        logger.info(f"目标C数量{target_c}: 采样{args.num_sequences}次，unique序列数: {len(unique_seqs)}，unique比例: {len(unique_seqs)/args.num_sequences:.2f}")
         for i, seq in enumerate(unique_seqs, 1):
-            print(f">Ring{ring}_Sample{i}\n{seq}")
+            print(f">C{target_c}_Sample{i}\n{seq}")
 
 if __name__ == "__main__":
     main() 

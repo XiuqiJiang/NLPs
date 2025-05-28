@@ -74,8 +74,8 @@ def vae_token_loss(
         input_ids: 输入的token IDs
         mean: 隐变量的均值
         logvar: 隐变量的对数方差
-        ring_pred: 预测的环数
-        ring_info: 环数信息
+        ring_pred: 预测的环数logits [batch_size, num_classes]
+        ring_info: 环数信息 [batch_size]，值为0到num_classes-1
         epoch: 当前epoch
         pad_token_id: padding token的ID
     Returns:
@@ -96,16 +96,19 @@ def vae_token_loss(
     
     # 总损失
     loss = recon_loss + beta * kl_loss
-    # 计算环数损失（仅有条件时）
+    
+    # 计算环数损失（使用交叉熵）
     if ring_pred is not None and ring_info is not None:
+        # 确保ring_info是long类型
         ring_info = ring_info.long()
-        # 将实际环数标签（如1~8）映射为0~N-1
-        ring_info_mapped = ring_info - 1  # 1~8 → 0~7
-        num_classes = ring_pred.shape[1] if ring_pred.dim() > 1 else 1
-        assert ring_info_mapped.min() >= 0 and ring_info_mapped.max() < num_classes, f"标签越界: {ring_info_mapped.min()} ~ {ring_info_mapped.max()}，类别数: {num_classes}"
-        ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info_mapped)
+        # 使用交叉熵损失
+        ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info)
     else:
         ring_loss = torch.tensor(0.0, device=recon_logits.device)
+    
+    # 将环数损失加入总损失
+    loss = loss + ring_loss
+    
     return loss, recon_loss, kl_loss, ring_loss
 
 def train_epoch(
