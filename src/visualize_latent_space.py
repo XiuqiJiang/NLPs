@@ -98,7 +98,7 @@ def main():
         'rnn_hidden_dim': getattr(config, 'RNN_HIDDEN_DIM', 256),
         'num_rnn_layers': getattr(config, 'NUM_RNN_LAYERS', 1),
         'ring_embedding_dim': getattr(config, 'RING_EMBEDDING_DIM', 32),
-        'num_classes': 8,  # 保证与训练时一致
+        'num_classes': 9,  # 保证与训练时一致
     }
 
     # IMPORTANT: Get vocab_size, max_sequence_length, and pad_token_id from the actual data/tokenizer if possible.

@@ -9,6 +9,9 @@ import logging
 from pathlib import Path
 import torch.nn.functional as F
 import argparse
+from sklearn.metrics import confusion_matrix, classification_report
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 # 添加项目根目录到Python路径
 root_dir = Path(__file__).parent.parent
@@ -282,6 +285,33 @@ def find_checkpoints(checkpoint_dir: str) -> list[tuple[int, str]]:
             
     return sorted(checkpoints, key=lambda x: x[0])
 
+def evaluate_ring_predictor(model, val_loader, device, num_classes=9):
+    all_true = []
+    all_pred = []
+    model.eval()
+    with torch.no_grad():
+        for batch in val_loader:
+            embeddings = batch['embeddings'].to(device)
+            ring_info = batch['ring_info'].to(device)
+            mu, logvar = model.encode(embeddings)
+            ring_pred_logits = model.ring_predictor(mu)
+            ring_pred = torch.argmax(ring_pred_logits, dim=1)
+            all_true.extend(ring_info.cpu().numpy())
+            all_pred.extend(ring_pred.cpu().numpy())
+    # 混淆矩阵
+    cm = confusion_matrix(all_true, all_pred, labels=list(range(num_classes)))
+    print("混淆矩阵：")
+    print(cm)
+    print("分类报告：")
+    print(classification_report(all_true, all_pred, labels=list(range(num_classes))))
+    # 可视化
+    plt.figure(figsize=(8,6))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=range(num_classes), yticklabels=range(num_classes))
+    plt.xlabel('预测标签')
+    plt.ylabel('真实标签')
+    plt.title('ring_predictor 混淆矩阵')
+    plt.show()
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description='测试VAE模型的重构能力')
@@ -316,6 +346,8 @@ def main():
         # 只测试最佳模型
         best_model_path = os.path.join(MODEL_SAVE_DIR, 'best_model.pt')
         if os.path.exists(best_model_path):
+            model, tokenizer = load_model(best_model_path)
+            evaluate_ring_predictor(model, val_loader, DEVICE, num_classes=9)
             test_epoch(0, best_model_path, val_loader)  # epoch设为0表示最佳模型
         else:
             logger.error(f"找不到最佳模型文件: {best_model_path}")

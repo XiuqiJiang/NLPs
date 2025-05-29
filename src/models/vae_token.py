@@ -220,12 +220,6 @@ class ESMVAEToken(nn.Module):
         batch_size = z.size(0)
         device = z.device
         
-        # 打印输入维度
-        print(f"Input z shape: {z.shape}")
-        if ring_info is not None:
-            print(f"Input ring_info shape: {ring_info.shape}")
-            print(f"Ring info values: {ring_info}")
-        
         # 编码环数信息
         if ring_info is not None:
             if ring_info.device != z.device:
@@ -239,23 +233,14 @@ class ESMVAEToken(nn.Module):
         else:
             ring_embedding = torch.zeros(z.size(0), self.ring_embedding_dim, device=z.device)
         
-        print(f"Ring embedding shape: {ring_embedding.shape}")
-        
-        # 检查z和ring_embedding的维度
-        if z.size(0) != ring_embedding.size(0):
-            raise ValueError(f"批次大小不匹配: z={z.size(0)}, ring_embedding={ring_embedding.size(0)}")
-        
         # 拼接z和ring_embedding初始化RNN隐藏状态
         try:
             z = torch.cat([z, ring_embedding], dim=-1)
-            print(f"Concatenated z shape: {z.shape}")
         except RuntimeError as e:
-            print(f"拼接错误: z shape={z.shape}, ring_embedding shape={ring_embedding.shape}")
             raise
         
         h0 = self.latent_to_rnn_hidden(z)
         h0 = h0.view(self.num_rnn_layers, batch_size, self.rnn_hidden_dim)
-        print(f"Initial hidden state shape: {h0.shape}")
         
         if target_ids is not None:
             # Teacher Forcing
@@ -269,46 +254,19 @@ class ESMVAEToken(nn.Module):
             sos_tokens = torch.full((batch_size, 1), self.sos_token_id, device=device)
             decoder_input_ids = torch.cat([sos_tokens, decoder_input_ids], dim=1)
             
-            # 打印调试信息
-            print(f"decoder_input_ids shape: {decoder_input_ids.shape}")
-            
-            # 检查输入是否包含无效值
-            if torch.isnan(decoder_input_ids).any() or torch.isinf(decoder_input_ids.float()).any():
-                raise ValueError("输入包含 NaN 或 Inf 值")
-            
             decoder_inputs = self.decoder_embedding(decoder_input_ids)  # [batch, seq_len, emb_dim]
-            print(f"decoder_inputs shape: {decoder_inputs.shape}")
             
             cond_emb = ring_embedding.unsqueeze(1).repeat(1, decoder_inputs.size(1), 1)  # [batch, seq_len, ring_emb_dim]
-            print(f"cond_emb shape: {cond_emb.shape}")
             
             decoder_inputs = torch.cat([decoder_inputs, cond_emb], dim=-1)  # [batch, seq_len, emb+cond]
-            print(f"concatenated decoder_inputs shape: {decoder_inputs.shape}")
-            
-            # 检查输入是否包含无效值
-            if torch.isnan(decoder_inputs).any() or torch.isinf(decoder_inputs).any():
-                raise ValueError("拼接后的输入包含 NaN 或 Inf 值")
             
             try:
                 # 使用pack_padded_sequence处理变长序列
                 rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
-                print(f"rnn_outputs shape: {rnn_outputs.shape}")
-                
-                # 检查RNN输出是否包含无效值
-                if torch.isnan(rnn_outputs).any() or torch.isinf(rnn_outputs).any():
-                    raise ValueError("RNN输出包含 NaN 或 Inf 值")
-                
-                # 检查fc_out层的输入维度
-                print(f"fc_out input shape: {rnn_outputs.shape[-1]}, expected: {self.rnn_hidden_dim}")
-                print(f"fc_out output shape: {self.vocab_size}")
                 
                 logits = self.fc_out(rnn_outputs)
-                print(f"output logits shape: {logits.shape}")
                 return logits
             except RuntimeError as e:
-                print(f"RNN前向传播错误: {str(e)}")
-                print(f"输入形状: {decoder_inputs.shape}")
-                print(f"隐藏状态形状: {h0.shape}")
                 raise
         else:
             # Autoregressive Generation
@@ -334,9 +292,6 @@ class ESMVAEToken(nn.Module):
                     if (next_token == self.eos_token_id).all():
                         break
                 except RuntimeError as e:
-                    print(f"生成步骤 {t} 错误: {str(e)}")
-                    print(f"当前输入形状: {decoder_inputs.shape}")
-                    print(f"隐藏状态形状: {h0.shape}")
                     raise
             
             return output_sequence

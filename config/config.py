@@ -10,7 +10,7 @@ ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA_DIR = os.path.join(ROOT_DIR, "data")
 RAW_DATA_DIR = os.path.join(DATA_DIR, "raw")
 PROCESSED_DATA_DIR = os.path.join(DATA_DIR, "processed")
-SEQUENCE_FILE = os.path.join(RAW_DATA_DIR, "sequences.txt")
+SEQUENCE_FILE = os.path.join(RAW_DATA_DIR, "sequences_filtered_3to5C.txt")
 EMBEDDING_FILE = os.path.join(PROCESSED_DATA_DIR, "protein_data.pt")
 
 # 模型保存目录

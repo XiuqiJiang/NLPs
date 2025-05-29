@@ -14,15 +14,15 @@ def count_cysteines(sequence: str) -> int:
     return sequence.count('C')
 
 def get_ring_info(sequence: str) -> int:
-    """计算序列中的环数（半胱氨酸数量）
+    """计算序列中的环数标签（半胱氨酸数量-1，保证标签从0开始）
     
     Args:
         sequence: 蛋白质序列
         
     Returns:
-        环数（半胱氨酸数量）
+        环数标签（半胱氨酸数量-1，最小为0）
     """
-    return sequence.count('C')
+    return max(sequence.count('C') - 1, 0)
 
 def analyze_ring_distribution(sequences: List[str]) -> Dict[str, int]:
     """分析数据集中环数的分布

@@ -21,7 +21,7 @@ def test_data_loading():
     
     # 1. 检查原始序列文件
     print("\n1. 检查原始序列文件:")
-    print(f"序列文件路径: {SEQUENCE_FILE}")
+    print(f"序列文件路径: {SEQUENCE_FILE} (已切换为3~5C)")
     if os.path.exists(SEQUENCE_FILE):
         print("文件存在")
         sequences = load_sequences(SEQUENCE_FILE)
