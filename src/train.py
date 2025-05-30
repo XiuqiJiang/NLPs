@@ -87,34 +87,20 @@ def vae_token_loss(
         recon_logits.view(-1, recon_logits.size(-1)),
         input_ids.view(-1)
     )
-    # KL散度（标准写法，先sum后mean）
-    kl_per_sample = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)
-    kl_loss = kl_per_sample.mean()
-    
-    # 应用KLD floor
-    # kl_loss = torch.clamp(kl_loss, min=KLD_FLOOR) # 移除对KLD_FLOOR的引用
-    
-    # 总损失
-    loss = recon_loss + beta * kl_loss
-    
+    # Free Bits KL
+    kld_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)  # [batch]
+    kld_target = 1.0  # 可调
+    free_bits_kld = torch.clamp(kld_loss - kld_target, min=0)  # [batch]
+    kld_term = beta * free_bits_kld.mean()
     # 计算环数损失（使用交叉熵）
     if ring_pred is not None and ring_info is not None:
-        # 确保ring_info是long类型
         ring_info = ring_info.long()
-        # 使用交叉熵损失
         ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info)
     else:
         ring_loss = torch.tensor(0.0, device=recon_logits.device)
-    
-    # 将环数损失加入总损失
-    loss = loss + ring_loss
-    
-    # KL target loss软约束
-    # kld_target_component = KLD_TARGET_WEIGHT * (kld_loss - KLD_TARGET) ** 2 # 移除对KLD_TARGET和KLD_TARGET_WEIGHT的引用
-    # total_loss = recon_loss + beta * kld_loss + kld_target_component + ring_loss # 移除对kld_target_component的引用
-    total_loss = recon_loss + beta * kl_loss + ring_loss # 只保留recon_loss, beta*kld_loss, ring_loss
-    
-    return total_loss, recon_loss, kl_loss, ring_loss
+    # 总损失
+    loss = recon_loss + kld_term + ring_loss
+    return loss, recon_loss, kld_term, ring_loss
 
 def train_epoch(
     model: nn.Module,
