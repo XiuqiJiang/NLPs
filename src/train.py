@@ -66,7 +66,7 @@ def vae_token_loss(
     pad_token_id: int = 1,
     max_beta: float = 1.0,
     annealing_epochs: int = 10
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float, float, float]:
     """计算VAE的损失，使用Free Bits策略
     
     Args:
@@ -79,7 +79,7 @@ def vae_token_loss(
         epoch: 当前epoch
         pad_token_id: padding token的ID
     Returns:
-        (总损失, 重建损失, KL损失, 环数损失)
+        (总损失, 重建损失, KL损失, 环数损失, kld_target, free_bits_kld_mean, kld_raw_mean)
     """
     beta = get_beta(epoch, max_beta=MAX_BETA, warmup_epochs=WARMUP_EPOCHS)
     # 计算重建损失（交叉熵）
@@ -89,7 +89,7 @@ def vae_token_loss(
     )
     # Free Bits KL
     kld_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)  # [batch]
-    kld_target = 1.0  # 可调
+    kld_target = 2.0  # 可调，已提升
     free_bits_kld = torch.clamp(kld_loss - kld_target, min=0)  # [batch]
     kld_term = beta * free_bits_kld.mean()
     # 计算环数损失（使用交叉熵）
@@ -100,7 +100,8 @@ def vae_token_loss(
         ring_loss = torch.tensor(0.0, device=recon_logits.device)
     # 总损失
     loss = recon_loss + kld_term + ring_loss
-    return loss, recon_loss, kld_term, ring_loss
+    # 新增返回原始KLD均值
+    return loss, recon_loss, kld_term, ring_loss, kld_target, free_bits_kld.mean(), kld_loss.mean()
 
 def train_epoch(
     model: nn.Module,
@@ -128,6 +129,9 @@ def train_epoch(
     sum_recon_loss = 0
     sum_kld_loss = 0
     sum_ring_loss = 0
+    kld_target_epoch = 0
+    free_bits_kld_mean_sum = 0
+    sum_kld_raw_mean = 0
     
     for batch_idx, batch in enumerate(train_loader):
         embeddings = batch['embeddings'].to(device)
@@ -138,7 +142,7 @@ def train_epoch(
         logits, _, mu, logvar, ring_pred = model(
             embeddings, attention_mask, input_ids, ring_info
         )
-        loss, recon_loss, kld_loss, ring_loss = vae_token_loss(
+        loss, recon_loss, kld_loss, ring_loss, kld_target, free_bits_kld_mean, kld_raw_mean = vae_token_loss(
             logits, input_ids, mu, logvar, ring_pred, ring_info, epoch, pad_token_id
         )
         optimizer.zero_grad()
@@ -150,7 +154,13 @@ def train_epoch(
         sum_recon_loss += recon_loss.item() if isinstance(recon_loss, torch.Tensor) else recon_loss
         sum_kld_loss += kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss
         sum_ring_loss += ring_loss.item() if isinstance(ring_loss, torch.Tensor) else ring_loss
-        
+        # 新增统计 kld_target 和 free_bits_kld_mean
+        if batch_idx == 0:
+            kld_target_epoch = kld_target
+        if batch_idx == 0:
+            free_bits_kld_mean_sum = 0
+        free_bits_kld_mean_sum = free_bits_kld_mean_sum + (free_bits_kld_mean.item() if isinstance(free_bits_kld_mean, torch.Tensor) else free_bits_kld_mean)
+        sum_kld_raw_mean += kld_raw_mean.item() if isinstance(kld_raw_mean, torch.Tensor) else kld_raw_mean
         # 打印进度
         if batch_idx % 10 == 0:
             print(f'Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} '
@@ -162,12 +172,17 @@ def train_epoch(
     avg_recon_loss = sum_recon_loss / len(train_loader)
     avg_kld_loss = sum_kld_loss / len(train_loader)
     avg_ring_loss = sum_ring_loss / len(train_loader)
+    avg_free_bits_kld_mean = free_bits_kld_mean_sum / len(train_loader)
+    avg_kld_raw_mean = sum_kld_raw_mean / len(train_loader)
     
     return {
         'loss': avg_loss,
         'recon_loss': avg_recon_loss,
         'kld_loss': avg_kld_loss,
-        'ring_loss': avg_ring_loss
+        'ring_loss': avg_ring_loss,
+        'kld_target': kld_target_epoch,
+        'free_bits_kld_mean': avg_free_bits_kld_mean,
+        'kld_raw_mean': avg_kld_raw_mean
     }
 
 def validate(
@@ -192,6 +207,7 @@ def validate(
     total_recon_loss = 0
     total_kld_loss = 0
     total_ring_loss = 0
+    total_kld_raw_mean = 0
     with torch.no_grad():
         for batch_idx, batch in enumerate(val_loader):
             embeddings = batch['embeddings'].to(device)
@@ -218,23 +234,29 @@ def validate(
             logits, _, mu, logvar, ring_pred = model(
                 embeddings, attention_mask, input_ids, ring_info
             )
-            loss, recon_loss, kld_loss, ring_loss = vae_token_loss(
+            loss, recon_loss, kld_loss, ring_loss, kld_target, free_bits_kld_mean, kld_raw_mean = vae_token_loss(
                 logits, input_ids, mu, logvar, ring_pred, ring_info, epoch=0, pad_token_id=pad_token_id
             )
             total_loss += loss.item() if isinstance(loss, torch.Tensor) else loss
             total_recon_loss += recon_loss.item() if isinstance(recon_loss, torch.Tensor) else recon_loss
             total_kld_loss += kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss
             total_ring_loss += ring_loss.item() if isinstance(ring_loss, torch.Tensor) else ring_loss
+            total_kld_raw_mean += kld_raw_mean.item() if isinstance(kld_raw_mean, torch.Tensor) else kld_raw_mean
     num_batches = len(val_loader)
     avg_loss = total_loss / num_batches
     avg_recon_loss = total_recon_loss / num_batches
     avg_kld_loss = total_kld_loss / num_batches
     avg_ring_loss = total_ring_loss / num_batches
+    avg_free_bits_kld_mean = free_bits_kld_mean / len(val_loader)
+    avg_kld_raw_mean = total_kld_raw_mean / len(val_loader)
     return {
         'loss': avg_loss,
         'recon_loss': avg_recon_loss,
         'kld_loss': avg_kld_loss,
-        'ring_loss': avg_ring_loss
+        'ring_loss': avg_ring_loss,
+        'kld_target': kld_target,
+        'free_bits_kld_mean': avg_free_bits_kld_mean,
+        'kld_raw_mean': avg_kld_raw_mean
     }
 
 def save_checkpoint(
@@ -414,20 +436,25 @@ def main(args=None):
         val_kld_history.append(val_losses['kld_loss'])
         
         # 打印损失
-        print(f"[Epoch {epoch+1}] train_loss={train_losses['loss']:.4f}, train_recon={train_losses['recon_loss']:.4f}, train_kld={train_losses['kld_loss']:.4f}, train_ring_loss={train_losses['ring_loss']:.4f}")
-        print(f"[Epoch {epoch+1}] val_loss={val_losses['loss']:.4f}, val_recon={val_losses['recon_loss']:.4f}, val_kld={val_losses['kld_loss']:.4f}, val_ring_loss={val_losses['ring_loss']:.4f}")
+        print(f"[Epoch {epoch+1}] train_loss={train_losses['loss']:.4f}, train_recon={train_losses['recon_loss']:.4f}, train_kld={train_losses['kld_loss']:.4f}, train_ring_loss={train_losses['ring_loss']:.4f}, train_kld_raw_mean={train_losses['kld_raw_mean']:.4f}")
+        print(f"[Epoch {epoch+1}] val_loss={val_losses['loss']:.4f}, val_recon={val_losses['recon_loss']:.4f}, val_kld={val_losses['kld_loss']:.4f}, val_ring_loss={val_losses['ring_loss']:.4f}, val_kld_raw_mean={val_losses['kld_raw_mean']:.4f}")
+        # 新增打印 kld_target 和 free_bits_kld_mean
+        print(f"[Epoch {epoch+1}] kld_target={train_losses['kld_target']:.6f}, free_bits_kld_mean={train_losses['free_bits_kld_mean']:.6f}")
+        logging.info(f"[Epoch {epoch+1}] kld_target={train_losses['kld_target']:.6f}, free_bits_kld_mean={train_losses['free_bits_kld_mean']:.6f}, kld_raw_mean={train_losses['kld_raw_mean']:.6f}")
         
         # 记录损失和log_var统计信息
         logging.info(
             f"Train - Loss: {train_losses['loss']:.4f}, "
             f"Recon: {train_losses['recon_loss']:.4f}, "
-            f"KLD: {train_losses['kld_loss']:.4f}\n"
+            f"KLD: {train_losses['kld_loss']:.4f}, "
+            f"KLD_raw_mean: {train_losses['kld_raw_mean']:.4f}\n"
             f"Train ring_loss: {train_losses['ring_loss']:.4f}"
         )
         logging.info(
             f"Val - Loss: {val_losses['loss']:.4f}, "
             f"Recon: {val_losses['recon_loss']:.4f}, "
-            f"KLD: {val_losses['kld_loss']:.4f}\n"
+            f"KLD: {val_losses['kld_loss']:.4f}, "
+            f"KLD_raw_mean: {val_losses['kld_raw_mean']:.4f}\n"
             f"Val ring_loss: {val_losses['ring_loss']:.4f}"
         )
         
