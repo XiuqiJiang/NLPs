@@ -272,7 +272,7 @@ def generate_sequences_with_rings(
         logger.info(f"总共采样了 {z.shape[0]} 个潜在向量")
     
     # 创建条件向量（将实际C数量转换为模型内部标签）
-    decoder_label = target_rings - 1  # 转换为模型内部标签
+    decoder_label = c_count_to_label(target_rings)  # 正确映射
     condition = torch.full((z.shape[0],), decoder_label, device=device)
     logger.info(f"为解码器设置的条件标签: {decoder_label} (对应目标 {target_rings}个C)")
     
@@ -323,7 +323,7 @@ def generate_sequences_with_rings(
             z = torch.randn(num_sequences, model.latent_dim, device=device)
         
         # 创建条件向量（将实际C数量转换为模型内部标签）
-        decoder_label = target_rings - 1  # 转换为模型内部标签
+        decoder_label = c_count_to_label(target_rings)  # 正确映射
         condition = torch.full((z.shape[0],), decoder_label, device=device)
         
         # 解码
