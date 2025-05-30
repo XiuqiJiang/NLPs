@@ -45,11 +45,11 @@ LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
 # VAE训练参数
-MAX_BETA = 0.15  # 最大beta值
+MAX_BETA = 0.1  # 最大beta值
 WARMUP_EPOCHS = 100  # beta预热轮数
-KLD_TARGET = 0.1  # KL散度目标值
-KLD_TARGET_WEIGHT = 0.1  # KL散度目标惩罚权重
-KLD_FLOOR = 11.0  # KL散度下限，防止过度压缩
+# KLD_TARGET = 0.1  # KL散度目标值 # 暂时去掉
+# KLD_TARGET_WEIGHT = 0.1  # KL散度目标惩罚权重 # 暂时去掉
+# KLD_FLOOR = 0.0  # KL散度下限，防止过度压缩 # 暂时去掉
 
 def get_beta(epoch: int, max_beta: float = MAX_BETA, warmup_epochs: int = WARMUP_EPOCHS) -> float:
     """计算当前epoch的beta值
