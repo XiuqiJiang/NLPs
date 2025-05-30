@@ -95,7 +95,7 @@ def main():
         'pad_token_id': getattr(config, 'PAD_TOKEN_ID', 0),
         'use_layer_norm': getattr(config, 'USE_LAYER_NORM', True),
         'dropout': getattr(config, 'DROPOUT', 0.1),
-        'rnn_hidden_dim': getattr(config, 'RNN_HIDDEN_DIM', 256),
+        'rnn_hidden_dim': getattr(config, 'RNN_HIDDEN_DIM', 64),
         'num_rnn_layers': getattr(config, 'NUM_RNN_LAYERS', 1),
         'ring_embedding_dim': getattr(config, 'RING_EMBEDDING_DIM', 32),
         'num_classes': 3,  # 只支持3C,4C,5C

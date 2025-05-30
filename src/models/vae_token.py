@@ -22,26 +22,26 @@ class ESMVAEToken(nn.Module):
         self,
         input_dim: int,
         hidden_dims: list,
-        latent_dim: int,
         vocab_size: int,
         max_sequence_length: int,
         pad_token_id: int,
+        latent_dim: int = 16,
         use_layer_norm: bool = True,
         dropout: float = 0.1,
-        rnn_hidden_dim: int = 256,
+        rnn_hidden_dim: int = 64,
         num_rnn_layers: int = 1,
-        ring_embedding_dim: int = 32,  # 添加环数嵌入维度
-        num_classes: int = 3           # 只支持3类（3C,4C,5C）
+        ring_embedding_dim: int = 32,
+        num_classes: int = 3
     ):
         """初始化VAE模型
         
         Args:
             input_dim: 输入维度（ESM嵌入维度）
             hidden_dims: 隐藏层维度列表
-            latent_dim: 潜在空间维度
             vocab_size: 词汇表大小
             max_sequence_length: 最大序列长度
             pad_token_id: padding token的ID
+            latent_dim: 潜在空间维度
             use_layer_norm: 是否使用LayerNorm
             dropout: dropout比率
             rnn_hidden_dim: RNN隐藏层维度
@@ -84,16 +84,8 @@ class ESMVAEToken(nn.Module):
         )
         self.fc_out = nn.Linear(rnn_hidden_dim, vocab_size)
         
-        # 环数预测器：输出num_classes个logits
-        self.ring_predictor = nn.Sequential(
-            nn.Linear(latent_dim, 64),
-            nn.LayerNorm(64),
-            nn.LeakyReLU(),
-            nn.Linear(64, 32),
-            nn.LayerNorm(32),
-            nn.LeakyReLU(),
-            nn.Linear(32, num_classes)  # 输出3类
-        )
+        # 环数预测器：极简单层
+        self.ring_predictor = nn.Linear(latent_dim, num_classes)
         
         # 特殊token IDs
         self.sos_token_id = 0  # 开始token
