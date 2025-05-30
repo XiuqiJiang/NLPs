@@ -9,10 +9,7 @@ from config.config import (
     HIDDEN_DIMS,
     ESM_EMBEDDING_DIM,
     get_beta,
-    MAX_BETA,
-    KLD_TARGET,
-    KLD_FLOOR,
-    KLD_TARGET_WEIGHT
+    MAX_BETA
 )
 
 class ESMVAEToken(nn.Module):

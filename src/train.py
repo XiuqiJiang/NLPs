@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import logging
 from datetime import datetime
 from pathlib import Path
@@ -51,9 +51,7 @@ from config.config import (
     SEQUENCE_FILE,
     get_beta,
     MAX_BETA,
-    KLD_TARGET,
-    WARMUP_EPOCHS,
-    KLD_FLOOR
+    WARMUP_EPOCHS
 )
 from src.utils.ring_utils import get_ring_info, analyze_ring_distribution
 
@@ -65,8 +63,10 @@ def vae_token_loss(
     ring_pred: torch.Tensor,
     ring_info: torch.Tensor,
     epoch: int,
-    pad_token_id: int = 1
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    pad_token_id: int = 1,
+    max_beta: float = 1.0,
+    annealing_epochs: int = 10
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """计算VAE的损失，使用Free Bits策略
     
     Args:
@@ -92,7 +92,7 @@ def vae_token_loss(
     kl_loss = kl_per_sample.mean()
     
     # 应用KLD floor
-    kl_loss = torch.clamp(kl_loss, min=KLD_FLOOR)
+    # kl_loss = torch.clamp(kl_loss, min=KLD_FLOOR) # 移除对KLD_FLOOR的引用
     
     # 总损失
     loss = recon_loss + beta * kl_loss
@@ -109,7 +109,12 @@ def vae_token_loss(
     # 将环数损失加入总损失
     loss = loss + ring_loss
     
-    return loss, recon_loss, kl_loss, ring_loss
+    # KL target loss软约束
+    # kld_target_component = KLD_TARGET_WEIGHT * (kld_loss - KLD_TARGET) ** 2 # 移除对KLD_TARGET和KLD_TARGET_WEIGHT的引用
+    # total_loss = recon_loss + beta * kld_loss + kld_target_component + ring_loss # 移除对kld_target_component的引用
+    total_loss = recon_loss + beta * kl_loss + ring_loss # 只保留recon_loss, beta*kld_loss, ring_loss
+    
+    return total_loss, recon_loss, kl_loss, ring_loss
 
 def train_epoch(
     model: nn.Module,
