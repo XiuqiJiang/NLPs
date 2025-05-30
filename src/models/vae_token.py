@@ -31,7 +31,7 @@ class ESMVAEToken(nn.Module):
         rnn_hidden_dim: int = 256,
         num_rnn_layers: int = 1,
         ring_embedding_dim: int = 32,  # 添加环数嵌入维度
-        num_classes: int = 9           # 修改默认值为9，对应0-8个C
+        num_classes: int = 3           # 只支持3类（3C,4C,5C）
     ):
         """初始化VAE模型
         
@@ -92,7 +92,7 @@ class ESMVAEToken(nn.Module):
             nn.Linear(64, 32),
             nn.LayerNorm(32),
             nn.LeakyReLU(),
-            nn.Linear(32, num_classes)  # 输出num_classes个logits
+            nn.Linear(32, num_classes)  # 输出3类
         )
         
         # 特殊token IDs

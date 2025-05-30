@@ -69,7 +69,7 @@ def load_model(model_path: str) -> tuple[ESMVAEToken, AutoTokenizer]:
         pad_token_id=tokenizer.pad_token_id,
         use_layer_norm=True,
         dropout=0.1,
-        num_classes=9  # 保证与训练时一致
+        num_classes=3  # 只支持3C,4C,5C
     ).to(DEVICE)
     
     # 加载模型权重
@@ -406,6 +406,16 @@ def global_sample_sequences(
             results.append(seq)
     return results
 
+def c_count_to_label(c_count):
+    if c_count == 3:
+        return 0
+    elif c_count == 4:
+        return 1
+    elif c_count == 5:
+        return 2
+    else:
+        raise ValueError(f"只支持3~5C，收到{c_count}")
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="蛋白质VAE序列生成")
@@ -429,7 +439,7 @@ def main():
     
     if args.global_sample:
         # 将实际C数量转换为模型内部标签（减1）
-        decoder_label = args.target_c_count - 1
+        decoder_label = c_count_to_label(args.target_c_count)
         print(f"[全局采样] 采样{args.num_sequences}条，目标C数量={args.target_c_count}，解码器标签={decoder_label}")
         samples = global_sample_sequences(
             model,
@@ -449,6 +459,7 @@ def main():
 
     for target_c in target_c_counts:
         logger.info(f"\n=== 目标C数量: {target_c} ===")
+        target_label = c_count_to_label(target_c)
         sequences = generate_sequences_with_rings(
             model=model,
             tokenizer=tokenizer,

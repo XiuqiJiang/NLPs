@@ -369,7 +369,7 @@ def main(args=None):
         pad_token_id=pad_token_id,
         use_layer_norm=True,
         dropout=args.dropout,
-        num_classes=9  # 改为9，等于最大环数
+        num_classes=3  # 只支持3C,4C,5C
     ).to(device)
     
     # 初始化优化器
