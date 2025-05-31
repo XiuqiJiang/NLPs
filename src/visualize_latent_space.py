@@ -84,6 +84,10 @@ def main():
     device = torch.device(args.device)
     print(f"Using device: {device}")
 
+    # 打印config.py的RNN_HIDDEN_DIM和文件路径，帮助排查配置问题
+    print(f"config.RNN_HIDDEN_DIM = {getattr(config, 'RNN_HIDDEN_DIM', 'NOT FOUND')}")
+    print(f"config.py 路径: {getattr(config, '__file__', '未知')}")
+
     # Define model configuration based on config.py
     # Ensure all necessary parameters for ESMVAEToken are included and correctly named
     model_config = {
