@@ -51,7 +51,8 @@ from config.config import (
     SEQUENCE_FILE,
     get_beta,
     MAX_BETA,
-    WARMUP_EPOCHS
+    WARMUP_EPOCHS,
+    RNN_HIDDEN_DIM
 )
 from src.utils.ring_utils import get_ring_info, analyze_ring_distribution
 
@@ -382,7 +383,8 @@ def main(args=None):
         pad_token_id=pad_token_id,
         use_layer_norm=True,
         dropout=args.dropout,
-        num_classes=3  # 只支持3C,4C,5C
+        num_classes=3,  # 只支持3C,4C,5C
+        rnn_hidden_dim=RNN_HIDDEN_DIM  # 显式指定RNN隐藏层维度
     ).to(device)
     
     # 初始化优化器

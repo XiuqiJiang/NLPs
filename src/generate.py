@@ -29,7 +29,8 @@ from config.config import (
     ESM_EMBEDDING_DIM,
     HIDDEN_DIMS,
     LATENT_DIM,
-    GENERATED_SEQUENCES_PATH
+    GENERATED_SEQUENCES_PATH,
+    RNN_HIDDEN_DIM
 )
 
 def setup_logging():
@@ -69,7 +70,8 @@ def load_model(model_path: str) -> tuple[ESMVAEToken, AutoTokenizer]:
         pad_token_id=tokenizer.pad_token_id,
         use_layer_norm=True,
         dropout=0.1,
-        num_classes=3  # 只支持3C,4C,5C
+        num_classes=3,  # 只支持3C,4C,5C
+        rnn_hidden_dim=RNN_HIDDEN_DIM  # 显式指定RNN隐藏层维度
     ).to(DEVICE)
     
     # 加载模型权重
