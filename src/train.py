@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 
 # 修复导入路径
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from src.models.vae_token import ESMVAEToken
+from src.models.vae_token import ESMVAEToken, vae_token_loss
 from src.utils.data_utils import (
     create_data_loaders,
     ProteinDataset,
@@ -55,54 +55,6 @@ from config.config import (
     RNN_HIDDEN_DIM
 )
 from src.utils.ring_utils import get_ring_info, analyze_ring_distribution
-
-def vae_token_loss(
-    recon_logits: torch.Tensor,
-    input_ids: torch.Tensor,
-    mean: torch.Tensor,
-    logvar: torch.Tensor,
-    ring_pred: torch.Tensor,
-    ring_info: torch.Tensor,
-    epoch: int,
-    pad_token_id: int = 1,
-    max_beta: float = 1.0,
-    annealing_epochs: int = 10
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float, float, float]:
-    """计算VAE的损失，使用Free Bits策略
-    
-    Args:
-        recon_logits: 重建的logits
-        input_ids: 输入的token IDs
-        mean: 隐变量的均值
-        logvar: 隐变量的对数方差
-        ring_pred: 预测的环数logits [batch_size, num_classes]
-        ring_info: 环数信息 [batch_size]，值为0到num_classes-1
-        epoch: 当前epoch
-        pad_token_id: padding token的ID
-    Returns:
-        (总损失, 重建损失, KL损失, 环数损失, kld_target, free_bits_kld_mean, kld_raw_mean)
-    """
-    beta = get_beta(epoch, max_beta=MAX_BETA, warmup_epochs=WARMUP_EPOCHS)
-    # 计算重建损失（交叉熵）
-    recon_loss = nn.CrossEntropyLoss(reduction='mean', ignore_index=pad_token_id)(
-        recon_logits.view(-1, recon_logits.size(-1)),
-        input_ids.view(-1)
-    )
-    # Free Bits KL
-    kld_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)  # [batch]
-    kld_target = 0  # Free Bits阈值设为0
-    free_bits_kld = torch.clamp(kld_loss - kld_target, min=0)  # [batch]
-    kld_term = beta * free_bits_kld.mean()
-    # 计算环数损失（使用交叉熵）
-    if ring_pred is not None and ring_info is not None:
-        ring_info = ring_info.long()
-        ring_loss = nn.CrossEntropyLoss(reduction='mean')(ring_pred, ring_info)
-    else:
-        ring_loss = torch.tensor(0.0, device=recon_logits.device)
-    # 总损失
-    loss = recon_loss + kld_term + ring_loss
-    # 新增返回原始KLD均值
-    return loss, recon_loss, kld_term, ring_loss, kld_target, free_bits_kld.mean(), kld_loss.mean()
 
 def train_epoch(
     model: nn.Module,

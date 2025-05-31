@@ -101,7 +101,7 @@ def main():
         'dropout': getattr(config, 'DROPOUT', 0.1),
         'rnn_hidden_dim': getattr(config, 'RNN_HIDDEN_DIM', 64),
         'num_rnn_layers': getattr(config, 'NUM_RNN_LAYERS', 1),
-        'ring_embedding_dim': getattr(config, 'RING_EMBEDDING_DIM', 32),
+        'ring_embedding_dim': 128,  # 必须与训练时一致
         'num_classes': 3,  # 只支持3C,4C,5C
     }
 

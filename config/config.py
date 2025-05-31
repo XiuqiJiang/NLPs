@@ -51,7 +51,7 @@ WARMUP_EPOCHS = 100  # beta预热轮数
 # KLD_TARGET_WEIGHT = 0.1  # KL散度目标惩罚权重 # 暂时去掉
 # KLD_FLOOR = 0.0  # KL散度下限，防止过度压缩 # 暂时去掉
 
-def get_beta(epoch: int, max_beta: float = MAX_BETA, warmup_epochs: int = WARMUP_EPOCHS) -> float:
+def get_beta(epoch: int, max_beta: float = MAX_BETA, warmup_epochs: int = 300) -> float:
     """计算当前epoch的beta值
     
     Args:
@@ -87,6 +87,7 @@ HIDDEN_DIMS = [512, 256]
 LATENT_DIM = 16
 RNN_HIDDEN_DIM = 256
 NUM_RNN_LAYERS = 1
+RING_EMBEDDING_DIM = 64  # 条件嵌入维度，需与训练和推断保持一致
 
 # 随机种子
 RANDOM_SEED = 42

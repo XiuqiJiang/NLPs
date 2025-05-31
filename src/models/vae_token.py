@@ -12,6 +12,17 @@ from config.config import (
     MAX_BETA
 )
 
+RING_LOSS_WEIGHT = 10.0  # 显著提升环数损失权重
+# 解决KLD_TARGET/KLD_TARGET_WEIGHT未定义问题
+try:
+    KLD_TARGET
+except NameError:
+    KLD_TARGET = 0.0
+try:
+    KLD_TARGET_WEIGHT
+except NameError:
+    KLD_TARGET_WEIGHT = 0.0
+
 class ESMVAEToken(nn.Module):
     """基于ESM嵌入的VAE模型，输出token序列"""
     
@@ -24,10 +35,10 @@ class ESMVAEToken(nn.Module):
         pad_token_id: int,
         latent_dim: int = 16,
         use_layer_norm: bool = True,
-        dropout: float = 0.3,
+        dropout: float = 0.5,
         rnn_hidden_dim: int = 64,
         num_rnn_layers: int = 1,
-        ring_embedding_dim: int = 64,
+        ring_embedding_dim: int = 128,  # 条件embedding维度加大
         num_classes: int = 3
     ):
         """初始化VAE模型
@@ -47,6 +58,9 @@ class ESMVAEToken(nn.Module):
             num_classes: 环数分类类别数（0-8个C，共9类）
         """
         super().__init__()
+        self.dropout = dropout  # 先定义dropout参数，供build_encoder使用
+        self.token_dropout_rate = 0.5  # 训练初期Token Dropout率高，后期可降为0.2
+        self.unk_token_id = getattr(self, 'unk_token_id', 3)  # 默认3为<UNK>，如有特殊定义可调整
         self.input_dim = input_dim
         self.hidden_dims = hidden_dims
         self.latent_dim = latent_dim
@@ -77,13 +91,13 @@ class ESMVAEToken(nn.Module):
             hidden_size=rnn_hidden_dim,
             num_layers=num_rnn_layers,
             batch_first=True,
-            dropout=dropout if num_rnn_layers > 1 else 0
+            dropout=0.5  # 强化RNN层Dropout
         )
-        self.decoder_dropout = nn.Dropout(dropout)
+        self.decoder_dropout = nn.Dropout(0.5)  # 解码器输出Dropout提升
         self.fc_out = nn.Linear(rnn_hidden_dim, vocab_size)
         
         # 环数预测器：极简单层
-        self.ring_dropout = nn.Dropout(dropout)
+        self.ring_dropout = nn.Dropout(0.5)  # 环数预测头Dropout提升
         self.ring_predictor = nn.Linear(latent_dim, num_classes)
         
         # 特殊token IDs
@@ -113,7 +127,7 @@ class ESMVAEToken(nn.Module):
                 nn.Linear(in_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim) if self.use_layer_norm else nn.BatchNorm1d(hidden_dim),
                 nn.LeakyReLU(),
-                nn.Dropout(self.ring_dropout.p)
+                nn.Dropout(0.5)  # 编码器MLP Dropout提升
             ])
             in_dim = hidden_dim
         
@@ -196,13 +210,14 @@ class ESMVAEToken(nn.Module):
         ring_info = ring_info.long()
         return self.ring_encoder(ring_info)
     
-    def decode(self, z: torch.Tensor, target_ids: Optional[torch.Tensor] = None, ring_info: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def decode(self, z: torch.Tensor, target_ids: Optional[torch.Tensor] = None, ring_info: Optional[torch.Tensor] = None, gumbel_softmax: bool = False) -> torch.Tensor:
         """解码潜在向量
         
         Args:
             z: 潜在向量，形状为 [batch_size, latent_dim]
             target_ids: 目标token IDs (用于Teacher Forcing)，形状为 [batch_size, max_sequence_length]
             ring_info: 环数信息，形状为 [batch_size]
+            gumbel_softmax: 是否使用Gumbel-Softmax采样
             
         Returns:
             如果是 Teacher Forcing，返回 logits: [batch_size, max_sequence_length, vocab_size]
@@ -244,7 +259,11 @@ class ESMVAEToken(nn.Module):
             decoder_input_ids = target_ids[:, :-1]
             sos_tokens = torch.full((batch_size, 1), self.sos_token_id, device=device)
             decoder_input_ids = torch.cat([sos_tokens, decoder_input_ids], dim=1)
-            
+            # Token Dropout/Word Dropout：训练时以一定概率将输入token替换为<UNK>
+            if self.training and self.token_dropout_rate > 0:
+                mask = torch.rand(decoder_input_ids.shape, device=decoder_input_ids.device) < self.token_dropout_rate
+                decoder_input_ids = decoder_input_ids.clone()
+                decoder_input_ids[mask] = self.unk_token_id
             decoder_inputs = self.decoder_embedding(decoder_input_ids)  # [batch, seq_len, emb_dim]
             
             cond_emb = ring_embedding.unsqueeze(1).repeat(1, decoder_inputs.size(1), 1)  # [batch, seq_len, ring_emb_dim]
@@ -278,7 +297,11 @@ class ESMVAEToken(nn.Module):
                     rnn_output, h0 = self.decoder_rnn(decoder_inputs, h0)
                     last_output = rnn_output[:, -1]
                     logits = self.fc_out(self.decoder_dropout(last_output))
-                    next_token = torch.argmax(logits, dim=-1)
+                    if gumbel_softmax:
+                        # Gumbel-Softmax采样
+                        next_token = torch.nn.functional.gumbel_softmax(logits, tau=1.0, hard=True).argmax(dim=-1)
+                    else:
+                        next_token = torch.argmax(logits, dim=-1)
                     output_sequence[:, t] = next_token
                     if (next_token == self.eos_token_id).all():
                         break
@@ -351,13 +374,14 @@ def vae_token_loss(
     kld_raw_mean = kld_loss.detach().item() if isinstance(kld_loss, torch.Tensor) else float(kld_loss)
     
     # 计算环数预测损失
-    ring_loss = F.mse_loss(ring_pred, ring_info.float())
+    ring_loss = F.cross_entropy(ring_pred, ring_info.long())
     
     # 计算beta值
     beta = get_beta(epoch, max_beta, annealing_epochs)
     
     # KL target loss软约束
-    kld_target_component = KLD_TARGET_WEIGHT * (kld_loss - KLD_TARGET) ** 2
-    total_loss = recon_loss + beta * kld_loss + kld_target_component + ring_loss
+    kld_target = KLD_TARGET  # 保证返回值有定义
+    kld_target_component = KLD_TARGET_WEIGHT * (kld_loss - kld_target) ** 2
+    total_loss = recon_loss + beta * kld_loss + kld_target_component + RING_LOSS_WEIGHT * ring_loss
     
     return total_loss, recon_loss, beta * kld_loss, ring_loss, kld_target, 0.0, kld_raw_mean 
