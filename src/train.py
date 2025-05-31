@@ -89,7 +89,7 @@ def vae_token_loss(
     )
     # Free Bits KL
     kld_loss = -0.5 * torch.sum(1 + logvar - mean.pow(2) - logvar.exp(), dim=1)  # [batch]
-    kld_target = 2.0  # 可调，已提升
+    kld_target = 0  # Free Bits阈值设为0
     free_bits_kld = torch.clamp(kld_loss - kld_target, min=0)  # [batch]
     kld_term = beta * free_bits_kld.mean()
     # 计算环数损失（使用交叉熵）

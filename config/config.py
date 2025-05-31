@@ -45,7 +45,7 @@ LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
 # VAE训练参数
-MAX_BETA = 0.1  # 最大beta值
+MAX_BETA = 0.1  # 最大beta值，调大
 WARMUP_EPOCHS = 100  # beta预热轮数
 # KLD_TARGET = 0.1  # KL散度目标值 # 暂时去掉
 # KLD_TARGET_WEIGHT = 0.1  # KL散度目标惩罚权重 # 暂时去掉
@@ -85,7 +85,7 @@ GRADIENT_CLIPPING = 1.0
 # 模型架构配置
 HIDDEN_DIMS = [512, 256]
 LATENT_DIM = 16
-RNN_HIDDEN_DIM = 64
+RNN_HIDDEN_DIM = 256
 NUM_RNN_LAYERS = 1
 
 # 随机种子
