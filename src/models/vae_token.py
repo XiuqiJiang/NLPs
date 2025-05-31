@@ -286,19 +286,17 @@ class ESMVAEToken(nn.Module):
                 device=device
             )
             output_sequence[:, 0] = self.sos_token_id
-            
             for t in range(1, self.max_sequence_length):
                 current_input = output_sequence[:, :t]
                 decoder_inputs = self.decoder_embedding(current_input)
                 cond_emb = ring_embedding.unsqueeze(1).repeat(1, decoder_inputs.size(1), 1)
                 decoder_inputs = torch.cat([decoder_inputs, cond_emb], dim=-1)
-                
                 try:
                     rnn_output, h0 = self.decoder_rnn(decoder_inputs, h0)
                     last_output = rnn_output[:, -1]
                     logits = self.fc_out(self.decoder_dropout(last_output))
+                    # 默认greedy采样（argmax），只有gumbel_softmax=True时才用Gumbel-Softmax
                     if gumbel_softmax:
-                        # Gumbel-Softmax采样
                         next_token = torch.nn.functional.gumbel_softmax(logits, tau=1.0, hard=True).argmax(dim=-1)
                     else:
                         next_token = torch.argmax(logits, dim=-1)
@@ -307,7 +305,6 @@ class ESMVAEToken(nn.Module):
                         break
                 except RuntimeError as e:
                     raise
-            
             return output_sequence
     
     def forward(
