@@ -444,7 +444,7 @@ def main(args=None):
             )
     
     # 绘制损失曲线
-    epochs = range(1, args.epochs + 1)
+    epochs = range(1, len(train_loss_history) + 1)
     plt.figure(figsize=(12, 8))
     # 确保损失历史是CPU上的数值列表
     train_loss_history_cpu = [loss_item.cpu().item() if isinstance(loss_item, torch.Tensor) else loss_item for loss_item in train_loss_history]
