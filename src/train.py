@@ -438,25 +438,24 @@ def main(args=None):
         val_kld_history.append(val_losses['kld_loss'])
         
         # 打印损失
-        print(f"[Epoch {epoch+1}] train_loss={train_losses['loss']:.4f}, train_recon={train_losses['recon_loss']:.4f}, train_kld={train_losses['kld_loss']:.4f}, train_ring_loss={train_losses['ring_loss']:.4f}, train_kld_raw_mean={train_losses['kld_raw_mean']:.4f}")
-        print(f"[Epoch {epoch+1}] val_loss={val_losses['loss']:.4f}, val_recon={val_losses['recon_loss']:.4f}, val_kld={val_losses['kld_loss']:.4f}, val_ring_loss={val_losses['ring_loss']:.4f}, val_kld_raw_mean={val_losses['kld_raw_mean']:.4f}")
+        print(f"[Epoch {epoch+1}] train_loss={train_losses['loss']:.4f}, train_recon={train_losses['recon_loss']:.4f}, train_kld={train_losses['kld_loss']:.4f}, train_ring_loss={train_losses['ring_loss']:.4f}, train_kld_raw_mean={train_losses['kld_raw_mean']:.4f}, beta={beta:.4f}")
+        print(f"[Epoch {epoch+1}] val_loss={val_losses['loss']:.4f}, val_recon={val_losses['recon_loss']:.4f}, val_kld={val_losses['kld_loss']:.4f}, val_ring_loss={val_losses['ring_loss']:.4f}, val_kld_raw_mean={val_losses['kld_raw_mean']:.4f}, beta={beta:.4f}")
         # 新增打印 kld_target 和 free_bits_kld_mean
         print(f"[Epoch {epoch+1}] kld_target={train_losses['kld_target']:.6f}, free_bits_kld_mean={train_losses['free_bits_kld_mean']:.6f}")
-        logging.info(f"[Epoch {epoch+1}] kld_target={train_losses['kld_target']:.6f}, free_bits_kld_mean={train_losses['free_bits_kld_mean']:.6f}, kld_raw_mean={train_losses['kld_raw_mean']:.6f}")
-        
+        logging.info(f"[Epoch {epoch+1}] kld_target={train_losses['kld_target']:.6f}, free_bits_kld_mean={train_losses['free_bits_kld_mean']:.6f}, kld_raw_mean={train_losses['kld_raw_mean']:.6f}, beta={beta:.4f}")
         # 记录损失和log_var统计信息
         logging.info(
             f"Train - Loss: {train_losses['loss']:.4f}, "
             f"Recon: {train_losses['recon_loss']:.4f}, "
             f"KLD: {train_losses['kld_loss']:.4f}, "
-            f"KLD_raw_mean: {train_losses['kld_raw_mean']:.4f}\n"
+            f"KLD_raw_mean: {train_losses['kld_raw_mean']:.4f}, Beta: {beta:.4f}\n"
             f"Train ring_loss: {train_losses['ring_loss']:.4f}"
         )
         logging.info(
             f"Val - Loss: {val_losses['loss']:.4f}, "
             f"Recon: {val_losses['recon_loss']:.4f}, "
             f"KLD: {val_losses['kld_loss']:.4f}, "
-            f"KLD_raw_mean: {val_losses['kld_raw_mean']:.4f}\n"
+            f"KLD_raw_mean: {val_losses['kld_raw_mean']:.4f}, Beta: {beta:.4f}\n"
             f"Val ring_loss: {val_losses['ring_loss']:.4f}"
         )
         

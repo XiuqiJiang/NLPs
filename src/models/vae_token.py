@@ -24,10 +24,10 @@ class ESMVAEToken(nn.Module):
         pad_token_id: int,
         latent_dim: int = 16,
         use_layer_norm: bool = True,
-        dropout: float = 0.1,
+        dropout: float = 0.3,
         rnn_hidden_dim: int = 64,
         num_rnn_layers: int = 1,
-        ring_embedding_dim: int = 32,
+        ring_embedding_dim: int = 64,
         num_classes: int = 3
     ):
         """初始化VAE模型
@@ -79,9 +79,11 @@ class ESMVAEToken(nn.Module):
             batch_first=True,
             dropout=dropout if num_rnn_layers > 1 else 0
         )
+        self.decoder_dropout = nn.Dropout(dropout)
         self.fc_out = nn.Linear(rnn_hidden_dim, vocab_size)
         
         # 环数预测器：极简单层
+        self.ring_dropout = nn.Dropout(dropout)
         self.ring_predictor = nn.Linear(latent_dim, num_classes)
         
         # 特殊token IDs
@@ -111,7 +113,7 @@ class ESMVAEToken(nn.Module):
                 nn.Linear(in_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim) if self.use_layer_norm else nn.BatchNorm1d(hidden_dim),
                 nn.LeakyReLU(),
-                nn.Dropout(0.1)
+                nn.Dropout(self.ring_dropout.p)
             ])
             in_dim = hidden_dim
         
@@ -253,7 +255,7 @@ class ESMVAEToken(nn.Module):
                 # 使用pack_padded_sequence处理变长序列
                 rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
                 
-                logits = self.fc_out(rnn_outputs)
+                logits = self.fc_out(self.decoder_dropout(rnn_outputs))
                 return logits
             except RuntimeError as e:
                 raise
@@ -275,7 +277,7 @@ class ESMVAEToken(nn.Module):
                 try:
                     rnn_output, h0 = self.decoder_rnn(decoder_inputs, h0)
                     last_output = rnn_output[:, -1]
-                    logits = self.fc_out(last_output)
+                    logits = self.fc_out(self.decoder_dropout(last_output))
                     next_token = torch.argmax(logits, dim=-1)
                     output_sequence[:, t] = next_token
                     if (next_token == self.eos_token_id).all():
@@ -307,7 +309,7 @@ class ESMVAEToken(nn.Module):
         mu, logvar = self.encode(x, attention_mask)
         z = self.reparameterize(mu, logvar)
         # 预测环数（仅有条件时）
-        ring_pred = self.ring_predictor(mu) if ring_info is not None else None
+        ring_pred = self.ring_predictor(self.ring_dropout(mu)) if ring_info is not None else None
         # 解码
         if target_ids is not None:
             logits = self.decode(z, target_ids, ring_info)
@@ -327,27 +329,8 @@ def vae_token_loss(
     pad_token_id: int = 1,
     max_beta: float = 1.0,
     annealing_epochs: int = 10
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """计算VAE的损失函数
-    
-    Args:
-        recon_logits: 重建的logits [batch_size, seq_len, vocab_size]
-        input_ids: 输入的token IDs [batch_size, seq_len]
-        mu: 均值向量 [batch_size, latent_dim]
-        logvar: 对数方差向量 [batch_size, latent_dim]
-        ring_pred: 预测的环数 [batch_size]
-        ring_info: 真实的环数 [batch_size]
-        epoch: 当前训练轮次
-        pad_token_id: padding token的ID
-        max_beta: KL散度的最大权重
-        annealing_epochs: beta值达到最大值的轮次数
-        
-    Returns:
-        total_loss: 总损失
-        recon_loss: 重建损失
-        kld_loss: KL散度损失
-        ring_loss: 环数预测损失
-    """
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float, float, float]:
+    """计算VAE的损失函数，返回kld_raw_mean和beta，便于日志输出"""
     # 确保所有输入在同一设备上
     device = recon_logits.device
     input_ids = input_ids.to(device)
@@ -365,6 +348,7 @@ def vae_token_loss(
     
     # 计算KL散度损失
     kld_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    kld_raw_mean = kld_loss.detach().item() if isinstance(kld_loss, torch.Tensor) else float(kld_loss)
     
     # 计算环数预测损失
     ring_loss = F.mse_loss(ring_pred, ring_info.float())
@@ -376,4 +360,4 @@ def vae_token_loss(
     kld_target_component = KLD_TARGET_WEIGHT * (kld_loss - KLD_TARGET) ** 2
     total_loss = recon_loss + beta * kld_loss + kld_target_component + ring_loss
     
-    return total_loss, recon_loss, kld_loss, ring_loss 
+    return total_loss, recon_loss, beta * kld_loss, ring_loss, kld_target, 0.0, kld_raw_mean 
