@@ -12,6 +12,9 @@ from typing import List
 import torch.nn as nn
 import torch.nn.functional as F
 import Levenshtein
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
 
 # 添加项目根目录到Python路径
 root_dir = Path(__file__).parent.parent
@@ -72,7 +75,6 @@ def load_model(model_path: str) -> tuple[ESMVAEToken, AutoTokenizer]:
         pad_token_id=tokenizer.pad_token_id,
         use_layer_norm=True,
         dropout=0.1,
-        num_classes=3,  # 只支持3C,4C,5C
         rnn_hidden_dim=RNN_HIDDEN_DIM  # 显式指定RNN隐藏层维度
     ).to(DEVICE)
     
@@ -82,6 +84,11 @@ def load_model(model_path: str) -> tuple[ESMVAEToken, AutoTokenizer]:
     
     # 赋值tokenizer属性，便于后续decode
     model.tokenizer = tokenizer
+    
+    # ====== 断言特殊token id一致性 ======
+    assert tokenizer.pad_token_id == model.pad_token_id, f"pad_token_id不一致: {tokenizer.pad_token_id} vs {model.pad_token_id}"
+    assert hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id == model.eos_token_id, f"eos_token_id不一致: {getattr(tokenizer, 'eos_token_id', None)} vs {model.eos_token_id}"
+    assert hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id == model.sos_token_id, f"sos_token_id不一致: {getattr(tokenizer, 'bos_token_id', None)} vs {model.sos_token_id}"
     
     return model, tokenizer
 
@@ -130,7 +137,7 @@ def generate_sequences(
         logger.info(f"目标环数: {target_rings}，采样范围: {min(ring_range)}-{max(ring_range)}")
         
         # 解码生成序列
-        generated_ids = model.decode(z, target_ids=None, ring_info=ring_info)
+        generated_ids = model.decode(z, target_ids=None)
         
         # 将token IDs转换为序列
         valid_sequences = []
@@ -283,7 +290,7 @@ def generate_sequences_with_rings(
     # 解码（使用自回归模式，加入条件）
     logger.info("开始解码生成序列...")
     with torch.no_grad():
-        generated_token_ids = model.decode(z, target_ids=None, ring_info=condition)
+        generated_token_ids = model.decode(z, target_ids=None)
     
     # 将生成的token ids转换回序列
     valid_sequences = []
@@ -332,7 +339,7 @@ def generate_sequences_with_rings(
         
         # 解码
         with torch.no_grad():
-            generated_token_ids = model.decode(z, target_ids=None, ring_info=condition)
+            generated_token_ids = model.decode(z, target_ids=None)
         
         # 检查新生成的序列
         batch_valid = 0
@@ -397,7 +404,7 @@ def global_sample_sequences(
         # 2. 构造环数条件
         ring_info = torch.full((num_sequences,), ring_info_value, dtype=torch.long, device=device)
         # 3. 解码生成token id序列
-        generated_ids = model.decode(z, target_ids=None, ring_info=ring_info)
+        generated_ids = model.decode(z, target_ids=None)
         # 4. 转为蛋白质序列字符串
         for ids in generated_ids:
             # 截断到EOS
@@ -459,7 +466,7 @@ def sample_with_various_z(model, tokenizer, num_sequences=100, ring_info_value=0
                         break
                 generated_ids = output_sequence
             else:
-                generated_ids = model.decode(z, target_ids=None, ring_info=ring_info)
+                generated_ids = model.decode(z, target_ids=None)
         seqs = []
         for i, ids in enumerate(generated_ids):
             if isinstance(ids, torch.Tensor):
@@ -532,6 +539,105 @@ def local_perturbation_experiment(model, tokenizer, dataset, device, num_per_cla
                     c_count = gen_seq.count('C')
                     ed = edit_distance(seq, gen_seq)
                     print(f"  [扰动std={eps:.4f}, temp={temp:.2f}] 生成: {gen_seq} | C数={c_count} | 编辑距离={ed}")
+
+def generate_perturbed_for_all_train(model, tokenizer, dataset, device, num_per_sample=10, epsilon_stds=[0.001, 0.005, 0.01], temperature=1.0):
+    """对训练集每个样本z_mean多组扰动生成num_per_sample条新序列，输出原始与扰动序列及编辑距离统计"""
+    sequences = dataset.sequences
+    embeddings = dataset.embeddings
+    print(f"共{len(sequences)}条训练集样本，每条生成{num_per_sample}条扰动序列...")
+    for epsilon_std in epsilon_stds:
+        print(f"\n==== 当前扰动强度 epsilon_std={epsilon_std} ====")
+        all_edit_distances = []
+        for idx, seq in enumerate(sequences):
+            # 编码z_mean
+            esm_emb = embeddings[idx]
+            if isinstance(esm_emb, np.ndarray):
+                esm_emb = torch.tensor(esm_emb)
+            esm_emb = esm_emb.unsqueeze(0).to(device)
+            mu, _ = model.encode(esm_emb)
+            mu = mu.squeeze(0)
+            # 统计C数
+            c_count = seq.count('C')
+            ring_label = c_count - 3 if 3 <= c_count <= 5 else 0
+            print(f"\n样本{idx+1}: {seq}")
+            for j in range(num_per_sample):
+                z_perturbed = mu + torch.randn_like(mu) * epsilon_std
+                z_perturbed = z_perturbed.unsqueeze(0).to(device)
+                ring_info = torch.tensor([ring_label], dtype=torch.long, device=device)
+                with torch.no_grad():
+                    gen_ids = model.decode(z_perturbed, target_ids=None)
+                ids = gen_ids[0].detach().cpu().tolist()
+                gen_seq = tokenizer.decode(ids, skip_special_tokens=True)
+                ed = Levenshtein.distance(seq, gen_seq)
+                all_edit_distances.append(ed)
+                print(f"  [扰动{j+1}] 生成: {gen_seq} | 编辑距离: {ed}")
+        # 输出本组扰动的编辑距离统计
+        if all_edit_distances:
+            avg_ed = np.mean(all_edit_distances)
+            max_ed = np.max(all_edit_distances)
+            min_ed = np.min(all_edit_distances)
+            print(f"\n[扰动std={epsilon_std}] 全部扰动样本的编辑距离: 平均={avg_ed:.2f}，最小={min_ed}，最大={max_ed}")
+
+def vae_reconstruction_selfcheck(model, tokenizer, dataset, device):
+    """
+    取一条训练集embedding，encode后直接decode，检查能否还原原始序列
+    """
+    import numpy as np
+    from Levenshtein import distance as levenshtein_distance
+    print("========== VAE闭环自检 ==========")
+    seq = dataset.sequences[0]
+    esm_emb = dataset.embeddings[0]
+    if isinstance(esm_emb, np.ndarray):
+        esm_emb = torch.tensor(esm_emb)
+    esm_emb = esm_emb.unsqueeze(0).to(device)
+    with torch.no_grad():
+        mu, _ = model.encode(esm_emb)
+        gen_ids = model.decode(mu)
+        ids = gen_ids[0].detach().cpu().tolist()
+        recon_seq = tokenizer.decode(ids, skip_special_tokens=True)
+    print("原始序列:", seq)
+    print("重构序列:", recon_seq)
+    ed = levenshtein_distance(seq, recon_seq)
+    print(f"编辑距离: {ed}")
+    print("=================================")
+
+def visualize_z_space(model, dataset, device, method='pca', max_points=1000, save_path='z_space.png'):
+    """
+    可视化训练集z_mean分布，支持PCA和t-SNE
+    """
+    print(f"\n========== 可视化z_mean分布（{method.upper()}） ==========")
+    zs = []
+    labels = []
+    for i in range(min(len(dataset.sequences), max_points)):
+        seq = dataset.sequences[i]
+        esm_emb = dataset.embeddings[i]
+        if isinstance(esm_emb, np.ndarray):
+            esm_emb = torch.tensor(esm_emb)
+        esm_emb = esm_emb.unsqueeze(0).to(device)
+        with torch.no_grad():
+            mu, _ = model.encode(esm_emb)
+        zs.append(mu.squeeze(0).cpu().numpy())
+        # 以C数量为标签
+        labels.append(seq.count('C'))
+    zs = np.stack(zs)
+    labels = np.array(labels)
+    if method == 'pca':
+        reducer = PCA(n_components=2)
+    elif method == 'tsne':
+        reducer = TSNE(n_components=2, random_state=42, perplexity=30)
+    else:
+        raise ValueError('method必须为pca或tsne')
+    zs_2d = reducer.fit_transform(zs)
+    plt.figure(figsize=(7,6))
+    scatter = plt.scatter(zs_2d[:,0], zs_2d[:,1], c=labels, cmap='rainbow', alpha=0.7, s=18)
+    plt.colorbar(scatter, label='Cysteine Count')
+    plt.title(f'z_mean分布 ({method.upper()})')
+    plt.xlabel('z1')
+    plt.ylabel('z2')
+    plt.tight_layout()
+    plt.savefig(save_path)
+    print(f"z_mean二维分布图已保存到: {save_path}")
+    plt.close()
 
 def main():
     """主函数"""
@@ -607,8 +713,13 @@ def main():
         embeddings = [item['embeddings'] for item in data]
         embeddings = torch.stack(embeddings)
     dataset = ProteinDataset(sequences=sequences, embeddings=embeddings, tokenizer=tokenizer, max_length=MAX_SEQUENCE_LENGTH)
-    # 运行局部扰动采样实验
-    local_perturbation_experiment(model, tokenizer, dataset, DEVICE)
+    # ====== 只保留VAE闭环自检 ======
+    vae_reconstruction_selfcheck(model, tokenizer, dataset, DEVICE)
+    # ====== 新增z空间可视化 ======
+    visualize_z_space(model, dataset, DEVICE, method='pca', save_path='z_space_pca.png')
+    visualize_z_space(model, dataset, DEVICE, method='tsne', save_path='z_space_tsne.png')
+    # # 直接对训练集每个样本z_mean扰动生成10条新序列（多组epsilon_std）
+    # generate_perturbed_for_all_train(model, tokenizer, dataset, DEVICE, num_per_sample=10, epsilon_stds=[0.001, 0.005, 0.01], temperature=1.0)
 
 if __name__ == "__main__":
     main() 

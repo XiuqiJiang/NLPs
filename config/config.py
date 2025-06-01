@@ -84,9 +84,9 @@ MAX_GRAD_NORM = 1.0
 GRADIENT_CLIPPING = 1.0
 
 # 模型架构配置
-HIDDEN_DIMS = [512, 256]
-LATENT_DIM = 256  # 潜在空间维度，适合高重构能力需求
-RNN_HIDDEN_DIM = 256
+HIDDEN_DIMS = [1024, 512]
+LATENT_DIM = 512  # 潜在空间维度，适合高重构能力需求
+RNN_HIDDEN_DIM = 512
 NUM_RNN_LAYERS = 1
 RING_EMBEDDING_DIM = 64  # 条件嵌入维度，需与训练和推断保持一致
 

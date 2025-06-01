@@ -23,24 +23,24 @@ class ESMVAEToken(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        hidden_dims: list,
         vocab_size: int,
         max_sequence_length: int,
         pad_token_id: int,
-        latent_dim: int = 256,
+        hidden_dims: list = [1024, 512],
+        latent_dim: int = 512,
         use_layer_norm: bool = True,
-        dropout: float = 0.5,
-        rnn_hidden_dim: int = 256,
+        dropout: float = 0.2,
+        rnn_hidden_dim: int = 512,
         num_rnn_layers: int = 1
     ):
         """初始化VAE模型
         
         Args:
             input_dim: 输入维度（ESM嵌入维度）
-            hidden_dims: 隐藏层维度列表
             vocab_size: 词汇表大小
             max_sequence_length: 最大序列长度
             pad_token_id: padding token的ID
+            hidden_dims: 隐藏层维度列表
             latent_dim: 潜在空间维度
             use_layer_norm: 是否使用LayerNorm
             dropout: dropout比率
@@ -64,17 +64,18 @@ class ESMVAEToken(nn.Module):
         self.encoder = self.build_encoder()
         self.fc_mu = nn.Linear(hidden_dims[-1], latent_dim)
         self.fc_logvar = nn.Linear(hidden_dims[-1], latent_dim)
-        # RNN解码器
-        self.latent_to_rnn_hidden = nn.Linear(latent_dim, rnn_hidden_dim * num_rnn_layers)
+        # Transformer解码器替换RNN
         self.decoder_embedding = nn.Embedding(vocab_size, rnn_hidden_dim)
-        self.decoder_rnn = nn.GRU(
-            input_size=rnn_hidden_dim,
-            hidden_size=rnn_hidden_dim,
-            num_layers=num_rnn_layers,
-            batch_first=True,
-            dropout=0.1
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=rnn_hidden_dim,
+            nhead=8,
+            dim_feedforward=4*rnn_hidden_dim,
+            dropout=dropout,
+            activation='gelu',
+            batch_first=True
         )
-        self.decoder_dropout = nn.Dropout(0.1)
+        self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=2)
+        self.latent_to_memory = nn.Linear(latent_dim, rnn_hidden_dim)
         self.fc_out = nn.Linear(rnn_hidden_dim, vocab_size)
         # 特殊token IDs
         self.sos_token_id = 0
@@ -97,7 +98,7 @@ class ESMVAEToken(nn.Module):
                 nn.Linear(in_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim) if self.use_layer_norm else nn.BatchNorm1d(hidden_dim),
                 nn.LeakyReLU(),
-                nn.Dropout(0.1)  # 编码器MLP Dropout降低
+                nn.Dropout(0.0)
             ])
             in_dim = hidden_dim
         
@@ -170,13 +171,13 @@ class ESMVAEToken(nn.Module):
     def decode(self, z: torch.Tensor, target_ids: Optional[torch.Tensor] = None, gumbel_softmax: bool = False, scheduled_sampling_prob: float = 0.1) -> torch.Tensor:
         batch_size = z.size(0)
         device = z.device
-        h0 = self.latent_to_rnn_hidden(z)
-        h0 = h0.view(self.num_rnn_layers, batch_size, self.rnn_hidden_dim)
+        memory = self.latent_to_memory(z).unsqueeze(1)  # [B, 1, d_model]
+        max_len = self.max_sequence_length
         if target_ids is not None:
             seq_length = target_ids.size(1)
-            if seq_length > self.max_sequence_length:
-                target_ids = target_ids[:, :self.max_sequence_length]
-                seq_length = self.max_sequence_length
+            if seq_length > max_len:
+                target_ids = target_ids[:, :max_len]
+                seq_length = max_len
             decoder_input_ids = target_ids[:, :-1]
             sos_tokens = torch.full((batch_size, 1), self.sos_token_id, device=device)
             decoder_input_ids = torch.cat([sos_tokens, decoder_input_ids], dim=1)
@@ -184,52 +185,76 @@ class ESMVAEToken(nn.Module):
                 mask = torch.rand(decoder_input_ids.shape, device=decoder_input_ids.device) < self.token_dropout_rate
                 decoder_input_ids = decoder_input_ids.clone()
                 decoder_input_ids[mask] = self.unk_token_id
+            # scheduled sampling（仅在训练时）
             if self.training and scheduled_sampling_prob > 0:
                 decoder_input_ids_ss = decoder_input_ids.clone()
                 for t in range(1, decoder_input_ids.shape[1]):
                     if torch.rand(1).item() < scheduled_sampling_prob:
                         prev_inputs = decoder_input_ids_ss[:, :t]
                         prev_emb = self.decoder_embedding(prev_inputs)
-                        rnn_in = prev_emb
-                        rnn_out, _ = self.decoder_rnn(rnn_in, h0)
-                        logits = self.fc_out(self.decoder_dropout(rnn_out[:, -1:]))
+                        tgt_mask = nn.Transformer.generate_square_subsequent_mask(t).to(device)
+                        out = self.transformer_decoder(
+                            tgt=prev_emb,
+                            memory=memory.expand(batch_size, -1, -1),
+                            tgt_mask=tgt_mask
+                        )
+                        logits = self.fc_out(out[:, -1:])
                         pred_token = logits.argmax(dim=-1)
-                        decoder_input_ids_ss[:, t] = pred_token.squeeze(1)
+                        not_pad = decoder_input_ids_ss[:, t] != self.pad_token_id
+                        decoder_input_ids_ss[not_pad, t] = pred_token.squeeze(1)[not_pad]
                 decoder_input_ids = decoder_input_ids_ss
-            decoder_inputs = self.decoder_embedding(decoder_input_ids)
-            rnn_outputs, _ = self.decoder_rnn(decoder_inputs, h0)
-            logits = self.fc_out(self.decoder_dropout(rnn_outputs))
+            # embedding
+            tgt_emb = self.decoder_embedding(decoder_input_ids)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_emb.size(1)).to(device)
+            out = self.transformer_decoder(
+                tgt=tgt_emb,
+                memory=memory.expand(batch_size, -1, -1),
+                tgt_mask=tgt_mask
+            )
+            logits = self.fc_out(out)
+            # ====== DEBUG PRINT（teacher forcing重构）======
+            print("[DEBUG] target_ids[0]:", target_ids[0].detach().cpu().tolist())
+            print("[DEBUG] decoder_input_ids[0]:", decoder_input_ids[0].detach().cpu().tolist())
+            print("[DEBUG] logits.argmax(-1)[0]:", logits[0].argmax(-1).detach().cpu().tolist())
+            if batch_size > 1:
+                print("[DEBUG] target_ids[1]:", target_ids[1].detach().cpu().tolist())
+                print("[DEBUG] decoder_input_ids[1]:", decoder_input_ids[1].detach().cpu().tolist())
+                print("[DEBUG] logits.argmax(-1)[1]:", logits[1].argmax(-1).detach().cpu().tolist())
+            # ====== END DEBUG PRINT ======
             return logits
         else:
-            output_sequence = torch.full(
-                (batch_size, self.max_sequence_length),
-                self.pad_token_id,
-                device=device
-            )
-            output_sequence[:, 0] = self.sos_token_id
+            # 自回归生成
+            generated = torch.full((batch_size, 1), self.sos_token_id, dtype=torch.long, device=device)
             finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
-            for t in range(1, self.max_sequence_length):
-                current_input = output_sequence[:, :t]
-                decoder_inputs = self.decoder_embedding(current_input)
-                rnn_output, h0 = self.decoder_rnn(decoder_inputs, h0)
-                last_output = rnn_output[:, -1]
-                logits = self.fc_out(self.decoder_dropout(last_output))
-                if gumbel_softmax:
-                    next_token = torch.nn.functional.gumbel_softmax(logits, tau=1.0, hard=True).argmax(dim=-1)
-                else:
-                    next_token = torch.argmax(logits, dim=-1)
-                next_token = torch.where(finished, torch.full_like(next_token, self.pad_token_id), next_token)
-                output_sequence[:, t] = next_token
-                finished = finished | (next_token == self.eos_token_id)
+            for t in range(max_len):
+                tgt_emb = self.decoder_embedding(generated)
+                tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_emb.size(1)).to(device)
+                out = self.transformer_decoder(
+                    tgt=tgt_emb,
+                    memory=memory.expand(batch_size, -1, -1),
+                    tgt_mask=tgt_mask
+                )
+                logits = self.fc_out(out[:, -1:])
+                next_token = logits.argmax(dim=-1)
+                generated = torch.cat([generated, next_token], dim=1)
+                # ====== DEBUG PRINT（自回归生成）======
+                print(f"[DEBUG] t={t}, next_token[0]:", next_token[0].item(), "generated[0]:", generated[0].detach().cpu().tolist())
+                if batch_size > 1:
+                    print(f"[DEBUG] t={t}, next_token[1]:", next_token[1].item(), "generated[1]:", generated[1].detach().cpu().tolist())
+                # ====== END DEBUG PRINT ======
+                # 检查eos/pad
+                finished = finished | (next_token.squeeze(1) == self.eos_token_id) | (next_token.squeeze(1) == self.pad_token_id)
                 if finished.all():
                     break
-            return output_sequence
+            # 去掉sos
+            return generated[:, 1:]
     
     def forward(
         self,
         x: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        target_ids: Optional[torch.Tensor] = None
+        target_ids: Optional[torch.Tensor] = None,
+        scheduled_sampling_prob: float = 0.1
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """前向传播
         
@@ -237,6 +262,7 @@ class ESMVAEToken(nn.Module):
             x: 输入张量，形状为 [batch_size, seq_len, input_dim]
             attention_mask: 注意力掩码，形状为 [batch_size, seq_len]
             target_ids: 目标token IDs，形状为 [batch_size, max_sequence_length]
+            scheduled_sampling_prob: scheduled sampling概率
             
         Returns:
             (重构logits/生成token IDs, 输入token IDs, 均值, 对数方差)
@@ -244,7 +270,7 @@ class ESMVAEToken(nn.Module):
         mu, logvar = self.encode(x, attention_mask)
         z = self.reparameterize(mu, logvar)
         if target_ids is not None:
-            logits = self.decode(z, target_ids)
+            logits = self.decode(z, target_ids, scheduled_sampling_prob=scheduled_sampling_prob)
             return logits, target_ids, mu, logvar
         else:
             generated_ids = self.decode(z, None)
@@ -263,6 +289,8 @@ def vae_token_loss(
     input_ids = input_ids.to(device)
     mu = mu.to(device)
     logvar = logvar.to(device)
+    # 只在非pad位置计算loss
+    active_loss = input_ids != pad_token_id
     recon_loss = F.cross_entropy(
         recon_logits.view(-1, recon_logits.size(-1)),
         input_ids.view(-1),

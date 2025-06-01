@@ -63,7 +63,8 @@ def train_epoch(
     epoch: int,
     device: torch.device,
     pad_token_id: int,
-    beta: float
+    beta: float,
+    scheduled_sampling_prob: float = 0.1
 ) -> Dict[str, float]:
     """训练一个epoch
     
@@ -75,6 +76,7 @@ def train_epoch(
         device: 训练设备
         pad_token_id: padding token的ID
         beta: KL散度权重
+        scheduled_sampling_prob: 调度采样概率
         
     Returns:
         包含训练损失的字典
@@ -88,7 +90,7 @@ def train_epoch(
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         logits, _, mu, logvar = model(
-            embeddings, attention_mask, input_ids
+            embeddings, attention_mask, input_ids, scheduled_sampling_prob=scheduled_sampling_prob
         )
         loss, recon_loss, _, kld_loss, kld_raw_mean = vae_token_loss(
             logits, input_ids, mu, logvar, epoch, pad_token_id, beta=beta
@@ -115,7 +117,8 @@ def validate(
     val_loader: DataLoader,
     device: torch.device,
     pad_token_id: int,
-    beta: float
+    beta: float,
+    scheduled_sampling_prob: float = 0.1
 ) -> Dict[str, float]:
     """验证模型
     
@@ -125,6 +128,7 @@ def validate(
         device: 设备
         pad_token_id: padding token的ID
         beta: KL散度权重
+        scheduled_sampling_prob: 调度采样概率
         
     Returns:
         损失字典
@@ -139,7 +143,7 @@ def validate(
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             logits, _, mu, logvar = model(
-                embeddings, attention_mask, input_ids
+                embeddings, attention_mask, input_ids, scheduled_sampling_prob=scheduled_sampling_prob
             )
             loss, recon_loss, _, kld_loss, kld_raw_mean = vae_token_loss(
                 logits, input_ids, mu, logvar, epoch=0, pad_token_id=pad_token_id, beta=beta
@@ -268,50 +272,39 @@ def main(args=None):
     pad_token_id = tokenizer.pad_token_id
     logger.info(f"ESM tokenizer词汇表大小: {vocab_size}")
     logger.info(f"ESM tokenizer pad token ID: {pad_token_id}")
+    # ====== 断言特殊token id一致性 ======
+    assert tokenizer.pad_token_id == pad_token_id, f"pad_token_id不一致: {tokenizer.pad_token_id} vs {pad_token_id}"
+    assert hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id == 2, f"eos_token_id不一致: {getattr(tokenizer, 'eos_token_id', None)} vs 2"
+    assert hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id == 0, f"sos_token_id不一致: {getattr(tokenizer, 'bos_token_id', None)} vs 0"
     
-    # 初始化模型
-    logger.info("初始化模型...")
+    scheduled_sampling_prob = 0.7  # 固定为0.7，部分teacher forcing
+    print(f"\n===== Scheduled Sampling概率: {scheduled_sampling_prob} =====")
+    # 重新初始化模型和优化器，保证每轮独立
     model = ESMVAEToken(
         input_dim=args.input_dim,
         hidden_dims=HIDDEN_DIMS,
         latent_dim=args.latent_dim,
-        vocab_size=vocab_size,
+        vocab_size=33,  # 词表大小可根据实际情况调整
         max_sequence_length=args.max_length,
-        pad_token_id=pad_token_id,
+        pad_token_id=1,  # pad_token_id可根据实际情况调整
         use_layer_norm=True,
         dropout=args.dropout,
         rnn_hidden_dim=RNN_HIDDEN_DIM
-    ).to(device)
-    
-    # 初始化优化器
-    logger.info("初始化优化器...")
+    ).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
     optimizer = optim.AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=1e-4
     )
-    
-    # 初始化损失历史
     train_loss_history = []
-    train_recon_history = []
-    train_kld_history = []
     val_loss_history = []
-    val_recon_history = []
-    val_kld_history = []
-    
-    # 训练循环
     best_val_loss = float('inf')
-    epochs_no_improve = 0  # 记录val_loss未提升的轮数
-    for epoch in range(args.epochs):
-        # beta调度：前100轮为0，之后线性递增到0.01
-        if epoch < 100:
-            beta = 0.0
-        else:
-            beta = min(0.01, 0.01 * (epoch - 99) / max(1, args.epochs - 100))
-        print(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
-        logging.info(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
-        
-        # 训练
+    epochs_no_improve = 0
+    patience = 20  # 早停容忍轮数
+    min_delta = 1e-3  # 最小提升幅度
+    for epoch in range(1000):  # 训练1000轮
+        beta = 0.001  # KL loss权重设为0.001
+        print(f"[SS={scheduled_sampling_prob}] Epoch {epoch+1}")
         train_losses = train_epoch(
             model=model,
             train_loader=train_loader,
@@ -319,113 +312,88 @@ def main(args=None):
             epoch=epoch,
             device=device,
             pad_token_id=pad_token_id,
-            beta=beta
+            beta=beta,
+            scheduled_sampling_prob=scheduled_sampling_prob
         )
-        
-        # 验证
         val_losses = validate(
             model=model,
             val_loader=val_loader,
             device=device,
             pad_token_id=pad_token_id,
-            beta=beta
+            beta=beta,
+            scheduled_sampling_prob=scheduled_sampling_prob
         )
-        
-        # 记录损失历史
         train_loss_history.append(train_losses['loss'])
-        train_recon_history.append(train_losses['recon_loss'])
-        train_kld_history.append(train_losses['kld_loss'])
         val_loss_history.append(val_losses['loss'])
-        val_recon_history.append(val_losses['recon_loss'])
-        val_kld_history.append(val_losses['kld_loss'])
-        
-        # 打印损失
-        print(f"[Epoch {epoch+1}] train_loss={train_losses['loss']:.4f}, train_recon={train_losses['recon_loss']:.4f}, train_kld={train_losses['kld_loss']:.4f}")
-        print(f"[Epoch {epoch+1}] val_loss={val_losses['loss']:.4f}, val_recon={val_losses['recon_loss']:.4f}, val_kld={val_losses['kld_loss']:.4f}")
-        
-        # 保存最佳模型
-        if val_losses['loss'] < best_val_loss:
+        print(f"[SS={scheduled_sampling_prob}] Epoch {epoch+1} train_loss={train_losses['loss']:.4f}, val_loss={val_losses['loss']:.4f}")
+        # 自动保存当前checkpoint
+        save_checkpoint(
+            model,
+            optimizer,
+            epoch+1,
+            val_losses,
+            args.checkpoint_dir,
+            is_best=False
+        )
+        # 判断是否为最佳模型
+        if val_losses['loss'] < best_val_loss - min_delta:
             best_val_loss = val_losses['loss']
             epochs_no_improve = 0
             save_checkpoint(
-                model=model,
-                optimizer=optimizer,
-                epoch=epoch + 1,
-                losses=val_losses,
-                checkpoint_dir=args.checkpoint_dir,
-                is_best=True  # 标记为最佳模型
+                model,
+                optimizer,
+                epoch+1,
+                val_losses,
+                args.checkpoint_dir,
+                is_best=True
             )
+            print(f"[EarlyStopping] 新的最佳模型已保存，val_loss={best_val_loss:.4f}")
         else:
             epochs_no_improve += 1
+            print(f"[EarlyStopping] val_loss无提升，已连续{epochs_no_improve}轮")
         # 早停判断
-        if epochs_no_improve >= EARLY_STOPPING_PATIENCE:
-            print(f"早停：val_loss在{EARLY_STOPPING_PATIENCE}个epoch内未提升，提前停止训练。")
-            logging.info(f"早停：val_loss在{EARLY_STOPPING_PATIENCE}个epoch内未提升，提前停止训练。")
+        if epochs_no_improve >= patience:
+            print(f"[EarlyStopping] 验证集loss连续{patience}轮无提升，提前停止训练。")
             break
-        
-        # 检查潜在空间是否被过度压缩
-        if train_losses['recon_loss'] < 0.1:  # 如果recon_loss过小
-            logging.warning(
-                f"警告：潜在空间可能被过度压缩！"
-                f"recon_loss ({train_losses['recon_loss']:.4f}) 过小"
-            )
-        if train_losses['kld_loss'] < 0.1:  # 如果kld_loss过小
-            logging.warning(
-                f"警告：潜在空间可能缺乏多样性！"
-                f"kld_loss ({train_losses['kld_loss']:.4f}) 过小"
-            )
-    
-    # 绘制损失曲线
-    epochs = range(1, len(train_loss_history) + 1)
-    plt.figure(figsize=(12, 8))
-    # 确保损失历史是CPU上的数值列表
-    train_loss_history_cpu = [loss_item.cpu().item() if isinstance(loss_item, torch.Tensor) else loss_item for loss_item in train_loss_history]
-    val_loss_history_cpu = [loss_item.cpu().item() if isinstance(loss_item, torch.Tensor) else loss_item for loss_item in val_loss_history]
-    train_recon_history_cpu = [loss_item.cpu().item() if isinstance(loss_item, torch.Tensor) else loss_item for loss_item in train_recon_history]
-    val_recon_history_cpu = [loss_item.cpu().item() if isinstance(loss_item, torch.Tensor) else loss_item for loss_item in val_recon_history]
-    train_kld_history_cpu = [loss_item.cpu().item() if isinstance(loss_item, torch.Tensor) else loss_item for loss_item in train_kld_history]
-    val_kld_history_cpu = [loss_item.cpu().item() if isinstance(loss_item, torch.Tensor) else loss_item for loss_item in val_kld_history]
-    plt.plot(epochs, train_loss_history_cpu, label='Train Loss')
-    plt.plot(epochs, val_loss_history_cpu, label='Val Loss')
-    plt.plot(epochs, train_recon_history_cpu, label='Train Recon Loss', linestyle='--')
-    plt.plot(epochs, val_recon_history_cpu, label='Val Recon Loss', linestyle='--')
-    plt.plot(epochs, train_kld_history_cpu, label='Train KLD Loss', linestyle=':')
-    plt.plot(epochs, val_kld_history_cpu, label='Val KLD Loss', linestyle=':')
+        # 每隔10轮打印自回归生成样本
+        if (epoch + 1) % 10 == 0:
+            model.eval()
+            batch = next(iter(train_loader))
+            embeddings = batch['embeddings'][0:1].to(device)
+            input_ids = batch['input_ids'][0:1].to(device)
+            attention_mask = batch['attention_mask'][0:1].to(device)
+            with torch.no_grad():
+                mu, logvar = model.encode(embeddings, attention_mask)
+                gen_ids = model.decode(mu)
+                gen_seq = gen_ids[0].cpu().tolist()
+                input_token_ids = input_ids[0].cpu().tolist()
+                # decode为氨基酸序列
+                input_tokens = tokenizer.decode(input_token_ids, skip_special_tokens=True)
+                gen_tokens = tokenizer.decode(gen_seq, skip_special_tokens=True)
+                # 统计有效长度（遇到eos或pad即停止）
+                try:
+                    eos_idx = gen_seq.index(2)
+                except ValueError:
+                    eos_idx = len(gen_seq)
+                try:
+                    pad_idx = gen_seq.index(1)
+                except ValueError:
+                    pad_idx = len(gen_seq)
+                valid_len = min(eos_idx, pad_idx)
+                print(f"[SS={scheduled_sampling_prob}] Epoch {epoch+1} 原始序列: {input_tokens}")
+                print(f"[SS={scheduled_sampling_prob}] Epoch {epoch+1} 自回归生成序列: {gen_tokens} (有效长度: {valid_len})")
+                # ====== 详细print每步token分布 ======
+                print(f"[DEBUG] 生成token id序列: {gen_seq}")
+                print(f"[DEBUG] 生成token解码: {gen_tokens}")
+    # 保存loss曲线
+    plt.plot(train_loss_history, label=f'Train SS={scheduled_sampling_prob}')
+    plt.plot(val_loss_history, label=f'Val SS={scheduled_sampling_prob}')
+    plt.legend()
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
-    plt.title('训练与验证损失曲线')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig('loss_curve.png')
-    print('损失曲线已保存为 loss_curve.png')
-
-    # ====== 极简推理脚本示例：z扰动生成 ======
-    print("\n===== 极简推理脚本：z扰动生成相似序列 =====")
-    model.eval()
-    # 取训练集第一个batch第一个样本
-    batch = next(iter(train_loader))
-    embeddings = batch['embeddings'][0:1].to(device)
-    input_ids = batch['input_ids'][0:1].to(device)
-    attention_mask = batch['attention_mask'][0:1].to(device)
-    # 编码得到mu
-    with torch.no_grad():
-        mu, logvar = model.encode(embeddings, attention_mask)
-        orig_seq = input_ids[0].cpu().tolist()
-        print("原始序列:", orig_seq)
-        for i, std in enumerate([0.0, 0.002, 0.005, 0.01]):
-            z_new = mu + torch.randn_like(mu) * std
-            gen_ids = model.decode(z_new)
-            gen_seq = gen_ids[0].cpu().tolist()
-            # 计算编辑距离和差异位置
-            def simple_edit_distance(a, b):
-                # 只支持等长序列，统计不相等的token数
-                return sum(x != y for x, y in zip(a, b))
-            edit_dist = simple_edit_distance(orig_seq, gen_seq)
-            diff_pos = [i for i, (x, y) in enumerate(zip(orig_seq, gen_seq)) if x != y]
-            print(f"扰动std={std:.4f} 生成: {gen_seq}")
-            print(f"  编辑距离: {edit_dist}，差异位置: {diff_pos}")
-    print("===== 推理脚本结束 =====\n")
+    plt.title(f'Scheduled Sampling={scheduled_sampling_prob}')
+    plt.savefig(f'loss_curve_ss{int(scheduled_sampling_prob*100)}.png')
+    plt.close()
 
 if __name__ == '__main__':
     # 创建命令行参数解析器
