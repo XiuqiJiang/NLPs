@@ -9,19 +9,12 @@ from config.config import (
     HIDDEN_DIMS,
     ESM_EMBEDDING_DIM,
     get_beta,
-    MAX_BETA
+    MAX_BETA,
+    KLD_TARGET,
+    KLD_TARGET_WEIGHT
 )
 
 RING_LOSS_WEIGHT = 10.0  # 显著提升环数损失权重
-# 解决KLD_TARGET/KLD_TARGET_WEIGHT未定义问题
-try:
-    KLD_TARGET
-except NameError:
-    KLD_TARGET = 0.0
-try:
-    KLD_TARGET_WEIGHT
-except NameError:
-    KLD_TARGET_WEIGHT = 0.0
 
 class ESMVAEToken(nn.Module):
     """基于ESM嵌入的VAE模型，输出token序列"""
@@ -415,8 +408,13 @@ def vae_token_loss(
     )
     
     # 计算KL散度损失
-    kld_loss = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+    kld_element = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # [batch, latent_dim]
+    kld_element = kld_element.mean(dim=0)  # [latent_dim]
+    free_bits = 0.02  # 每维最小KL
+    kld_element = torch.clamp(kld_element, min=free_bits)
+    kld_loss = kld_element.sum()  # 总KL
     kld_raw_mean = kld_loss.detach().item() if isinstance(kld_loss, torch.Tensor) else float(kld_loss)
+    free_bits_kld_mean = kld_element.mean().item() if isinstance(kld_element, torch.Tensor) else float(kld_element.mean())
     
     # 计算环数预测损失
     ring_loss = F.cross_entropy(ring_pred, ring_info.long())
@@ -429,4 +427,4 @@ def vae_token_loss(
     kld_target_component = KLD_TARGET_WEIGHT * (kld_loss - kld_target) ** 2
     total_loss = recon_loss + beta * kld_loss + kld_target_component + RING_LOSS_WEIGHT * ring_loss
     
-    return total_loss, recon_loss, beta * kld_loss, ring_loss, kld_target, 0.0, kld_raw_mean 
+    return total_loss, recon_loss, beta * kld_loss, ring_loss, kld_target, free_bits_kld_mean, kld_raw_mean 
