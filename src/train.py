@@ -344,7 +344,7 @@ def main(args=None):
     optimizer = optim.AdamW(
         model.parameters(),
         lr=args.lr,
-        weight_decay=0.01
+        weight_decay=1e-4
     )
     
     # 初始化损失历史

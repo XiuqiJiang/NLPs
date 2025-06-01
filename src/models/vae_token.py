@@ -15,7 +15,7 @@ from config.config import (
     BETA_FREEZE_EPOCHS
 )
 
-RING_LOSS_WEIGHT = 10.0  # 显著提升环数损失权重
+RING_LOSS_WEIGHT = 0  # 只训练重构，不加环数损失
 
 class ESMVAEToken(nn.Module):
     """基于ESM嵌入的VAE模型，输出token序列"""
@@ -53,7 +53,7 @@ class ESMVAEToken(nn.Module):
         """
         super().__init__()
         self.dropout = dropout  # 先定义dropout参数，供build_encoder使用
-        self.token_dropout_rate = 0.1  # 只关心局部采样，降低Token Dropout强度
+        self.token_dropout_rate = 0.0  # 关闭Token Dropout
         self.unk_token_id = getattr(self, 'unk_token_id', 3)  # 默认3为<UNK>，如有特殊定义可调整
         self.input_dim = input_dim
         self.hidden_dims = hidden_dims
@@ -85,13 +85,13 @@ class ESMVAEToken(nn.Module):
             hidden_size=rnn_hidden_dim,
             num_layers=num_rnn_layers,
             batch_first=True,
-            dropout=0.5  # 强化RNN层Dropout
+            dropout=0.2  # 降低RNN层Dropout
         )
-        self.decoder_dropout = nn.Dropout(0.5)  # 解码器输出Dropout提升
+        self.decoder_dropout = nn.Dropout(0.2)  # 解码器输出Dropout降低
         self.fc_out = nn.Linear(rnn_hidden_dim, vocab_size)
         
         # 环数预测器：极简单层
-        self.ring_dropout = nn.Dropout(0.5)  # 环数预测头Dropout提升
+        self.ring_dropout = nn.Dropout(0.2)  # 环数预测头Dropout降低
         self.ring_predictor = nn.Linear(latent_dim, num_classes)
         
         # 特殊token IDs
@@ -121,7 +121,7 @@ class ESMVAEToken(nn.Module):
                 nn.Linear(in_dim, hidden_dim),
                 nn.LayerNorm(hidden_dim) if self.use_layer_norm else nn.BatchNorm1d(hidden_dim),
                 nn.LeakyReLU(),
-                nn.Dropout(0.5)  # 编码器MLP Dropout提升
+                nn.Dropout(0.2)  # 编码器MLP Dropout降低
             ])
             in_dim = hidden_dim
         
