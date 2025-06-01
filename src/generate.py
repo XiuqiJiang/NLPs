@@ -11,6 +11,7 @@ import argparse
 from typing import List
 import torch.nn as nn
 import torch.nn.functional as F
+import Levenshtein
 
 # 添加项目根目录到Python路径
 root_dir = Path(__file__).parent.parent
@@ -469,6 +470,69 @@ def sample_with_various_z(model, tokenizer, num_sequences=100, ring_info_value=0
         unique_seqs = set(seqs)
         print(f"z类型: {z_type}，采样{num_sequences}条，unique序列数: {len(unique_seqs)}，unique比例: {len(unique_seqs)/num_sequences:.2f}")
 
+def edit_distance(s1, s2):
+    """标准Levenshtein编辑距离"""
+    return Levenshtein.distance(s1, s2)
+
+# 局部扰动采样实验
+# 选取代表性肽、编码、扰动z、条件解码、评估
+
+def select_representative_peptides(dataset, num_per_class=3):
+    class_to_peptides = {0: [], 1: [], 2: []}
+    for i in range(len(dataset)):
+        seq = dataset.sequences[i]
+        c_count = seq.count('C')
+        if c_count in [3, 4, 5]:
+            label = c_count - 3
+            if len(class_to_peptides[label]) < num_per_class:
+                class_to_peptides[label].append(seq)
+        if all(len(v) >= num_per_class for v in class_to_peptides.values()):
+            break
+    return class_to_peptides
+
+def encode_peptides(model, tokenizer, peptides, device, sequences, embeddings):
+    model.eval()
+    z_means, z_logvars = [], []
+    for seq in peptides:
+        idx = sequences.index(seq)
+        esm_emb = embeddings[idx]
+        if isinstance(esm_emb, np.ndarray):
+            esm_emb = torch.tensor(esm_emb)
+        esm_emb = esm_emb.unsqueeze(0).to(device)  # [1, seq_len, input_dim]
+        mu, logvar = model.encode(esm_emb)
+        z_means.append(mu.squeeze(0).detach().cpu())
+        z_logvars.append(logvar.squeeze(0).detach().cpu())
+    return z_means, z_logvars
+
+def perturb_and_decode(model, tokenizer, z_mean, ring_label, epsilon_std, temperature=1.0, device='cuda'):
+    z_perturbed = z_mean + torch.randn_like(z_mean) * epsilon_std
+    z_perturbed = z_perturbed.unsqueeze(0).to(device)
+    ring_info = torch.tensor([ring_label], dtype=torch.long, device=device)
+    with torch.no_grad():
+        generated_ids = model.sample_from_z(z_perturbed, ring_info, temperature=temperature)
+    ids = generated_ids[0].detach().cpu().tolist()
+    seq = tokenizer.decode(ids, skip_special_tokens=True)
+    return seq, z_perturbed.cpu().numpy()
+
+def local_perturbation_experiment(model, tokenizer, dataset, device, num_per_class=3):
+    perturbation_stds = [0.0, 0.0005, 0.001, 0.005, 0.01]
+    temperatures = [0.0, 0.1, 0.2, 0.3]
+    class_to_peptides = select_representative_peptides(dataset, num_per_class)
+    # 获取sequences和embeddings
+    sequences = dataset.sequences
+    embeddings = dataset.embeddings
+    for label, peptides in class_to_peptides.items():
+        print(f"\n=== 环数类别 {label}（C数={label+3}） ===")
+        z_means, z_logvars = encode_peptides(model, tokenizer, peptides, device, sequences, embeddings)
+        for i, seq in enumerate(peptides):
+            print(f"\n原始肽{i+1}: {seq}")
+            for eps in perturbation_stds:
+                for temp in temperatures:
+                    gen_seq, z_pert = perturb_and_decode(model, tokenizer, z_means[i], label, eps, temp, device)
+                    c_count = gen_seq.count('C')
+                    ed = edit_distance(seq, gen_seq)
+                    print(f"  [扰动std={eps:.4f}, temp={temp:.2f}] 生成: {gen_seq} | C数={c_count} | 编辑距离={ed}")
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="蛋白质VAE序列生成")
@@ -532,6 +596,19 @@ def main():
     sample_with_various_z(model, tokenizer, num_sequences=100, ring_info_value=0, device=DEVICE, sampling=args.sampling, temperature=args.temperature)
     # 如需softmax采样：
     # sample_with_various_z(model, tokenizer, num_sequences=100, ring_info_value=0, device=DEVICE, sampling='softmax', temperature=1.2)
+
+    # 加载数据集
+    data = torch.load(EMBEDDING_FILE)
+    if isinstance(data, dict) and 'sequences' in data and 'embeddings' in data:
+        sequences = data['sequences']
+        embeddings = data['embeddings']
+    elif isinstance(data, list):
+        sequences = [item['sequence'] for item in data]
+        embeddings = [item['embeddings'] for item in data]
+        embeddings = torch.stack(embeddings)
+    dataset = ProteinDataset(sequences=sequences, embeddings=embeddings, tokenizer=tokenizer, max_length=MAX_SEQUENCE_LENGTH)
+    # 运行局部扰动采样实验
+    local_perturbation_experiment(model, tokenizer, dataset, DEVICE)
 
 if __name__ == "__main__":
     main() 

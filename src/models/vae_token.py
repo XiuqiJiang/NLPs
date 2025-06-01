@@ -33,10 +33,10 @@ class ESMVAEToken(nn.Module):
         vocab_size: int,
         max_sequence_length: int,
         pad_token_id: int,
-        latent_dim: int = 16,
+        latent_dim: int = 256,
         use_layer_norm: bool = True,
         dropout: float = 0.5,
-        rnn_hidden_dim: int = 64,
+        rnn_hidden_dim: int = 256,
         num_rnn_layers: int = 1,
         ring_embedding_dim: int = 128,  # 条件embedding维度加大
         num_classes: int = 3
@@ -337,6 +337,54 @@ class ESMVAEToken(nn.Module):
         else:
             generated_ids = self.decode(z, None, ring_info)
             return generated_ids, None, mu, logvar, ring_pred
+
+    def sample_from_z(self, z, ring_info, temperature=1.0, max_length=None):
+        """
+        从给定z和条件ring_info采样生成序列，支持temperature softmax采样。
+        """
+        self.eval()
+        batch_size = z.size(0)
+        device = z.device
+        max_length = max_length or self.max_sequence_length
+
+        # 编码环数信息
+        if ring_info.device != z.device:
+            ring_info = ring_info.to(z.device)
+        ring_info = ring_info.long()
+        ring_embedding = self.ring_encoder(ring_info)
+
+        # 拼接z和ring_embedding初始化RNN隐藏状态
+        z_cat = torch.cat([z, ring_embedding], dim=-1)
+        h0 = self.latent_to_rnn_hidden(z_cat)
+        h0 = h0.view(self.num_rnn_layers, batch_size, self.rnn_hidden_dim)
+
+        output_sequence = torch.full((batch_size, max_length), self.pad_token_id, device=device)
+        output_sequence[:, 0] = self.sos_token_id
+
+        finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
+
+        for t in range(1, max_length):
+            current_input = output_sequence[:, :t]
+            decoder_inputs = self.decoder_embedding(current_input)
+            cond_emb = ring_embedding.unsqueeze(1).repeat(1, decoder_inputs.size(1), 1)
+            decoder_inputs = torch.cat([decoder_inputs, cond_emb], dim=-1)
+            rnn_output, h0 = self.decoder_rnn(decoder_inputs, h0)
+            last_output = rnn_output[:, -1]
+            logits = self.fc_out(self.decoder_dropout(last_output))
+            if temperature is not None and abs(temperature) < 1e-8:
+                # 贪婪解码
+                next_token = torch.argmax(logits, dim=-1)
+            else:
+                probs = torch.softmax(logits / (temperature if temperature > 0 else 1e-8), dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            # 对已完成序列，强制填充pad
+            next_token = torch.where(finished, torch.full_like(next_token, self.pad_token_id), next_token)
+            output_sequence[:, t] = next_token
+            # 更新finished标记
+            finished = finished | (next_token == self.eos_token_id)
+            if finished.all():
+                break
+        return output_sequence
 
 def vae_token_loss(
     recon_logits: torch.Tensor,  # [batch_size, seq_len, vocab_size]
