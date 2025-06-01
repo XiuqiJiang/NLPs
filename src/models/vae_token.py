@@ -11,7 +11,8 @@ from config.config import (
     get_beta,
     MAX_BETA,
     KLD_TARGET,
-    KLD_TARGET_WEIGHT
+    KLD_TARGET_WEIGHT,
+    BETA_FREEZE_EPOCHS
 )
 
 RING_LOSS_WEIGHT = 10.0  # 显著提升环数损失权重
@@ -26,7 +27,7 @@ class ESMVAEToken(nn.Module):
         vocab_size: int,
         max_sequence_length: int,
         pad_token_id: int,
-        latent_dim: int = 256,
+        latent_dim: int = 128,
         use_layer_norm: bool = True,
         dropout: float = 0.5,
         rnn_hidden_dim: int = 256,
@@ -390,9 +391,8 @@ def vae_token_loss(
     pad_token_id: int = 1,
     max_beta: float = 1.0,
     annealing_epochs: int = 10
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, float, float, float]:
-    """计算VAE的损失函数，返回kld_raw_mean和beta，便于日志输出"""
-    # 确保所有输入在同一设备上
+) -> Tuple[torch.Tensor, torch.Tensor, float, torch.Tensor, float, float, float]:
+    """只优化重构损失和环数损失，KLD仅做日志输出"""
     device = recon_logits.device
     input_ids = input_ids.to(device)
     mu = mu.to(device)
@@ -400,14 +400,14 @@ def vae_token_loss(
     ring_pred = ring_pred.to(device)
     ring_info = ring_info.to(device)
     
-    # 计算重建损失
+    # 计算重构损失
     recon_loss = F.cross_entropy(
         recon_logits.view(-1, recon_logits.size(-1)),
         input_ids.view(-1),
         ignore_index=pad_token_id
     )
     
-    # 计算KL散度损失
+    # 计算KL散度（仅日志用，不参与loss）
     kld_element = -0.5 * (1 + logvar - mu.pow(2) - logvar.exp())  # [batch, latent_dim]
     kld_element = kld_element.mean(dim=0)  # [latent_dim]
     free_bits = 0.02  # 每维最小KL
@@ -419,12 +419,11 @@ def vae_token_loss(
     # 计算环数预测损失
     ring_loss = F.cross_entropy(ring_pred, ring_info.long())
     
-    # 计算beta值
-    beta = get_beta(epoch, max_beta, annealing_epochs)
+    # 总损失只包含重构和环数损失
+    total_loss = recon_loss + RING_LOSS_WEIGHT * ring_loss
     
-    # KL target loss软约束
-    kld_target = KLD_TARGET  # 保证返回值有定义
-    kld_target_component = KLD_TARGET_WEIGHT * (kld_loss - kld_target) ** 2
-    total_loss = recon_loss + beta * kld_loss + kld_target_component + RING_LOSS_WEIGHT * ring_loss
+    # beta和kld_target只做日志输出
+    beta = 0.0
+    kld_target = KLD_TARGET
     
-    return total_loss, recon_loss, beta * kld_loss, ring_loss, kld_target, free_bits_kld_mean, kld_raw_mean 
+    return total_loss, recon_loss, beta, ring_loss, kld_target, free_bits_kld_mean, kld_raw_mean 

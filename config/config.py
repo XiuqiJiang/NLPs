@@ -32,7 +32,7 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # 模型配置
 ESM_MODEL_PATH = os.environ.get("ESM_MODEL_PATH", "/content/drive/MyDrive/esm_model")  # 默认Google Drive路径，可通过环境变量覆盖
 ESM_MODEL_NAME = "esm2-fine-tune"
-ESM_EMBEDDING_DIM = 640
+ESM_EMBEDDING_DIM = 1280  # ESM嵌入维度，需与ESM模型输出一致
 ESM_FINETUNE_EPOCHS = 6
 
 # 序列配置
@@ -45,34 +45,35 @@ LEARNING_RATE = 1e-4
 ESM_LEARNING_RATE = 1e-5
 
 # VAE训练参数
-MAX_BETA = 0.001  # 最大beta值，极小
+MAX_BETA = 0.0  # 最大beta值，训练全程无KL正则，退化为AE
 WARMUP_EPOCHS = 100  # beta预热轮数
-KLD_TARGET = 5.0  # KL散度目标值
+BETA_FREEZE_EPOCHS = 60  # 前60轮冻结beta为0
+KLD_TARGET = 2.0  # KL散度目标值
 KLD_TARGET_WEIGHT = 1.0  # KL散度目标惩罚权重
 # KLD_FLOOR = 0.0  # KL散度下限，防止过度压缩 # 暂时去掉
 
-def get_beta(epoch: int, max_beta: float = MAX_BETA, warmup_epochs: int = 300) -> float:
-    """计算当前epoch的beta值
+def get_beta(epoch: int, max_beta: float = MAX_BETA, warmup_epochs: int = 300, freeze_epochs: int = BETA_FREEZE_EPOCHS) -> float:
+    """计算当前epoch的beta值，支持前freeze_epochs轮beta为0
     
     Args:
         epoch: 当前epoch（从0开始）
         max_beta: 最大beta值
         warmup_epochs: 预热期epoch数
+        freeze_epochs: 冻结期epoch数（前N轮beta为0）
         
     Returns:
         beta值，范围从0到max_beta
     """
     if warmup_epochs == 0:
         return max_beta
-        
-    if epoch < warmup_epochs:
+    if epoch < freeze_epochs:
+        return 0.0
+    elif epoch < freeze_epochs + warmup_epochs:
         # 线性增长到max_beta
-        # 使用(epoch + 1)确保第一轮beta > 0
-        current_progress = (epoch + 1) / warmup_epochs
+        current_progress = (epoch - freeze_epochs + 1) / warmup_epochs
         beta = current_progress * max_beta
-        return min(beta, max_beta)  # 确保不超过max_beta
+        return min(beta, max_beta)
     else:
-        # 预热期后，保持max_beta
         return max_beta
 
 BETA = 0.0  # 初始beta值，实际值会在训练过程中通过get_beta函数计算
@@ -84,7 +85,7 @@ GRADIENT_CLIPPING = 1.0
 
 # 模型架构配置
 HIDDEN_DIMS = [512, 256]
-LATENT_DIM = 256
+LATENT_DIM = 128  # 潜在空间维度，适合高重构能力需求
 RNN_HIDDEN_DIM = 256
 NUM_RNN_LAYERS = 1
 RING_EMBEDDING_DIM = 64  # 条件嵌入维度，需与训练和推断保持一致
