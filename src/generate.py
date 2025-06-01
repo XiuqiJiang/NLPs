@@ -10,6 +10,7 @@ from pathlib import Path
 import argparse
 from typing import List
 import torch.nn as nn
+import torch.nn.functional as F
 
 # 添加项目根目录到Python路径
 root_dir = Path(__file__).parent.parent
@@ -418,6 +419,56 @@ def c_count_to_label(c_count):
     else:
         raise ValueError(f"只支持3~5C，收到{c_count}")
 
+def sample_with_various_z(model, tokenizer, num_sequences=100, ring_info_value=0, device='cuda', sampling='greedy', temperature=1.0):
+    """
+    采样极端z（全0、全1、全-1、全正、全负、随机），并生成序列，统计unique比例。
+    支持greedy和softmax采样。
+    """
+    z_types = {
+        'zero': torch.zeros(num_sequences, model.latent_dim, device=device),
+        'one': torch.ones(num_sequences, model.latent_dim, device=device),
+        'minus_one': -torch.ones(num_sequences, model.latent_dim, device=device),
+        'random': torch.randn(num_sequences, model.latent_dim, device=device),
+        'all_pos': torch.abs(torch.randn(num_sequences, model.latent_dim, device=device)),
+        'all_neg': -torch.abs(torch.randn(num_sequences, model.latent_dim, device=device)),
+    }
+    ring_info = torch.full((num_sequences,), ring_info_value, dtype=torch.long, device=device)
+    for z_type, z in z_types.items():
+        print(f"\n==== z类型: {z_type} ====")
+        with torch.no_grad():
+            # 支持softmax采样
+            if sampling == 'softmax':
+                generated_ids = []
+                h0 = model.latent_to_rnn_hidden(torch.cat([z, model.ring_encoder(ring_info)], dim=-1))
+                h0 = h0.view(model.num_rnn_layers, num_sequences, model.rnn_hidden_dim)
+                output_sequence = torch.full((num_sequences, model.max_sequence_length), model.pad_token_id, device=device)
+                output_sequence[:, 0] = model.sos_token_id
+                for t in range(1, model.max_sequence_length):
+                    current_input = output_sequence[:, :t]
+                    decoder_inputs = model.decoder_embedding(current_input)
+                    cond_emb = model.ring_encoder(ring_info).unsqueeze(1).repeat(1, decoder_inputs.size(1), 1)
+                    decoder_inputs = torch.cat([decoder_inputs, cond_emb], dim=-1)
+                    rnn_output, h0 = model.decoder_rnn(decoder_inputs, h0)
+                    last_output = rnn_output[:, -1]
+                    logits = model.fc_out(model.decoder_dropout(last_output))
+                    probs = F.softmax(logits / temperature, dim=-1)
+                    next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)
+                    output_sequence[:, t] = next_token
+                    if (next_token == model.eos_token_id).all():
+                        break
+                generated_ids = output_sequence
+            else:
+                generated_ids = model.decode(z, target_ids=None, ring_info=ring_info)
+        seqs = []
+        for i, ids in enumerate(generated_ids):
+            if isinstance(ids, torch.Tensor):
+                ids = ids.detach().cpu().tolist()
+            seq = tokenizer.decode(ids, skip_special_tokens=True)
+            seqs.append(seq)
+            print(f"z[{i}] ({z_type}): {z[i].cpu().numpy()[:5]}... => {seq}")
+        unique_seqs = set(seqs)
+        print(f"z类型: {z_type}，采样{num_sequences}条，unique序列数: {len(unique_seqs)}，unique比例: {len(unique_seqs)/num_sequences:.2f}")
+
 def main():
     """主函数"""
     parser = argparse.ArgumentParser(description="蛋白质VAE序列生成")
@@ -426,6 +477,7 @@ def main():
     parser.add_argument('--target_c_count', type=int, default=3, help='实际目标半胱氨酸数量 (例如: 填3代表希望生成3个C的序列)')
     parser.add_argument('--temperature', type=float, default=1.0, help='采样温度')
     parser.add_argument('--global_sample', action='store_true', help='是否启用全局采样模式')
+    parser.add_argument('--sampling', type=str, default='greedy', choices=['greedy', 'softmax'], help='采样方式: greedy 或 softmax')
     args = parser.parse_args()
     
     logger = setup_logging()
@@ -475,6 +527,11 @@ def main():
         logger.info(f"目标C数量{target_c}: 采样{args.num_sequences}次，unique序列数: {len(unique_seqs)}，unique比例: {len(unique_seqs)/args.num_sequences:.2f}")
         for i, seq in enumerate(unique_seqs, 1):
             print(f">C{target_c}_Sample{i}\n{seq}")
+
+    # 以3环为例，采样极端z并分析多样性
+    sample_with_various_z(model, tokenizer, num_sequences=100, ring_info_value=0, device=DEVICE, sampling=args.sampling, temperature=args.temperature)
+    # 如需softmax采样：
+    # sample_with_various_z(model, tokenizer, num_sequences=100, ring_info_value=0, device=DEVICE, sampling='softmax', temperature=1.2)
 
 if __name__ == "__main__":
     main() 

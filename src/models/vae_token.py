@@ -59,7 +59,7 @@ class ESMVAEToken(nn.Module):
         """
         super().__init__()
         self.dropout = dropout  # 先定义dropout参数，供build_encoder使用
-        self.token_dropout_rate = 0.5  # 训练初期Token Dropout率高，后期可降为0.2
+        self.token_dropout_rate = 0.1  # 只关心局部采样，降低Token Dropout强度
         self.unk_token_id = getattr(self, 'unk_token_id', 3)  # 默认3为<UNK>，如有特殊定义可调整
         self.input_dim = input_dim
         self.hidden_dims = hidden_dims
