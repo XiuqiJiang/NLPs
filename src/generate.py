@@ -64,7 +64,9 @@ def load_model(model_path: str) -> tuple[ESMVAEToken, AutoTokenizer]:
     
     # 加载tokenizer
     tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_PATH, local_files_only=True)
-    
+    # ====== 若无bos_token_id则补充为0 ======
+    if not hasattr(tokenizer, 'bos_token_id') or tokenizer.bos_token_id is None:
+        tokenizer.bos_token_id = 0
     # 初始化模型
     model = ESMVAEToken(
         input_dim=ESM_EMBEDDING_DIM,
@@ -77,18 +79,16 @@ def load_model(model_path: str) -> tuple[ESMVAEToken, AutoTokenizer]:
         dropout=0.1,
         rnn_hidden_dim=RNN_HIDDEN_DIM  # 显式指定RNN隐藏层维度
     ).to(DEVICE)
-    
+    # ====== 保证model.sos_token_id与tokenizer.bos_token_id一致 ======
+    model.sos_token_id = tokenizer.bos_token_id
     # 加载模型权重
     model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    
     # 赋值tokenizer属性，便于后续decode
     model.tokenizer = tokenizer
-    
-    # ====== 断言特殊token id一致性 ======
+    # ====== 断言特殊token id一致性（只检查pad/eos） ======
     assert tokenizer.pad_token_id == model.pad_token_id, f"pad_token_id不一致: {tokenizer.pad_token_id} vs {model.pad_token_id}"
     assert hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id == model.eos_token_id, f"eos_token_id不一致: {getattr(tokenizer, 'eos_token_id', None)} vs {model.eos_token_id}"
-    assert hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id == model.sos_token_id, f"sos_token_id不一致: {getattr(tokenizer, 'bos_token_id', None)} vs {model.sos_token_id}"
     
     return model, tokenizer
 
@@ -540,43 +540,46 @@ def local_perturbation_experiment(model, tokenizer, dataset, device, num_per_cla
                     ed = edit_distance(seq, gen_seq)
                     print(f"  [扰动std={eps:.4f}, temp={temp:.2f}] 生成: {gen_seq} | C数={c_count} | 编辑距离={ed}")
 
-def generate_perturbed_for_all_train(model, tokenizer, dataset, device, num_per_sample=10, epsilon_stds=[0.001, 0.005, 0.01], temperature=1.0):
-    """对训练集每个样本z_mean多组扰动生成num_per_sample条新序列，输出原始与扰动序列及编辑距离统计"""
+def generate_perturbed_for_all_train(model, tokenizer, dataset, device):
+    """对训练集每个样本z_mean多组扰动、不同温度各生成5条新序列，输出原始与扰动序列及编辑距离统计"""
     sequences = dataset.sequences
     embeddings = dataset.embeddings
-    print(f"共{len(sequences)}条训练集样本，每条生成{num_per_sample}条扰动序列...")
+    num_per_sample = 5
+    epsilon_stds = [0.001, 0.005, 0.01]
+    temperatures = [0.7, 1.0, 1.3]
+    print(f"共{len(sequences)}条训练集样本，每条每扰动强度每温度生成{num_per_sample}条扰动序列...")
     for epsilon_std in epsilon_stds:
         print(f"\n==== 当前扰动强度 epsilon_std={epsilon_std} ====")
-        all_edit_distances = []
-        for idx, seq in enumerate(sequences):
-            # 编码z_mean
-            esm_emb = embeddings[idx]
-            if isinstance(esm_emb, np.ndarray):
-                esm_emb = torch.tensor(esm_emb)
-            esm_emb = esm_emb.unsqueeze(0).to(device)
-            mu, _ = model.encode(esm_emb)
-            mu = mu.squeeze(0)
-            # 统计C数
-            c_count = seq.count('C')
-            ring_label = c_count - 3 if 3 <= c_count <= 5 else 0
-            print(f"\n样本{idx+1}: {seq}")
-            for j in range(num_per_sample):
-                z_perturbed = mu + torch.randn_like(mu) * epsilon_std
-                z_perturbed = z_perturbed.unsqueeze(0).to(device)
-                ring_info = torch.tensor([ring_label], dtype=torch.long, device=device)
-                with torch.no_grad():
-                    gen_ids = model.decode(z_perturbed, target_ids=None)
-                ids = gen_ids[0].detach().cpu().tolist()
-                gen_seq = tokenizer.decode(ids, skip_special_tokens=True)
-                ed = Levenshtein.distance(seq, gen_seq)
-                all_edit_distances.append(ed)
-                print(f"  [扰动{j+1}] 生成: {gen_seq} | 编辑距离: {ed}")
-        # 输出本组扰动的编辑距离统计
-        if all_edit_distances:
-            avg_ed = np.mean(all_edit_distances)
-            max_ed = np.max(all_edit_distances)
-            min_ed = np.min(all_edit_distances)
-            print(f"\n[扰动std={epsilon_std}] 全部扰动样本的编辑距离: 平均={avg_ed:.2f}，最小={min_ed}，最大={max_ed}")
+        for temp in temperatures:
+            print(f"\n---- 当前temperature={temp} ----")
+            all_edit_distances = []
+            for idx, seq in enumerate(sequences):
+                esm_emb = embeddings[idx]
+                if isinstance(esm_emb, np.ndarray):
+                    esm_emb = torch.tensor(esm_emb)
+                esm_emb = esm_emb.unsqueeze(0).to(device)
+                mu, _ = model.encode(esm_emb)
+                mu = mu.squeeze(0)
+                c_count = seq.count('C')
+                ring_label = c_count - 3 if 3 <= c_count <= 5 else 0
+                print(f"\n样本{idx+1}: {seq}")
+                for j in range(num_per_sample):
+                    z_perturbed = mu + torch.randn_like(mu) * epsilon_std
+                    z_perturbed = z_perturbed.unsqueeze(0).to(device)
+                    ring_info = torch.tensor([ring_label], dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        gen_ids = model.decode(z_perturbed, target_ids=None, temperature=temp)
+                    ids = gen_ids[0].detach().cpu().tolist()
+                    gen_seq = tokenizer.decode(ids, skip_special_tokens=True)
+                    ed = Levenshtein.distance(seq, gen_seq)
+                    all_edit_distances.append(ed)
+                    print(f"  [扰动{j+1}] 生成: {gen_seq} | 编辑距离: {ed}")
+            # 输出本组扰动的编辑距离统计
+            if all_edit_distances:
+                avg_ed = np.mean(all_edit_distances)
+                max_ed = np.max(all_edit_distances)
+                min_ed = np.min(all_edit_distances)
+                print(f"\n[扰动std={epsilon_std}, temp={temp}] 全部扰动样本的编辑距离: 平均={avg_ed:.2f}，最小={min_ed}，最大={max_ed}")
 
 def vae_reconstruction_selfcheck(model, tokenizer, dataset, device):
     """
@@ -641,67 +644,13 @@ def visualize_z_space(model, dataset, device, method='pca', max_points=1000, sav
 
 def main():
     """主函数"""
-    parser = argparse.ArgumentParser(description="蛋白质VAE序列生成")
+    parser = argparse.ArgumentParser(description="蛋白质VAE训练集扰动生成")
     parser.add_argument('--model_path', type=str, required=True, help='模型权重路径')
-    parser.add_argument('--num_sequences', type=int, default=100, help='生成序列数量')
-    parser.add_argument('--target_c_count', type=int, default=3, help='实际目标半胱氨酸数量 (例如: 填3代表希望生成3个C的序列)')
-    parser.add_argument('--temperature', type=float, default=1.0, help='采样温度')
-    parser.add_argument('--global_sample', action='store_true', help='是否启用全局采样模式')
-    parser.add_argument('--sampling', type=str, default='greedy', choices=['greedy', 'softmax'], help='采样方式: greedy 或 softmax')
     args = parser.parse_args()
-    
+
     logger = setup_logging()
-    logger.info("开始生成序列...")
-    
-    # 使用默认模型路径
-    model_path = args.model_path
-    logger.info(f"使用默认模型路径: {model_path}")
-    
-    # 加载模型
-    logger.info(f"从 {model_path} 加载模型...")
-    model, tokenizer = load_model(model_path)
-    
-    if args.global_sample:
-        # 将实际C数量转换为模型内部标签（减1）
-        decoder_label = c_count_to_label(args.target_c_count)
-        print(f"[全局采样] 采样{args.num_sequences}条，目标C数量={args.target_c_count}，解码器标签={decoder_label}")
-        samples = global_sample_sequences(
-            model,
-            tokenizer,
-            num_sequences=args.num_sequences,
-            ring_info_value=decoder_label,  # 使用转换后的标签
-            temperature=args.temperature,
-            device=DEVICE
-        )
-        for i, seq in enumerate(samples):
-            print(f">Sample_{i+1}\n{seq}")
-        print(f"共生成{len(samples)}条序列")
-        return
-
-    # 支持多个环数批量生成，局部高斯采样
-    target_c_counts = [args.target_c_count]
-
-    for target_c in target_c_counts:
-        logger.info(f"\n=== 目标C数量: {target_c} ===")
-        target_label = c_count_to_label(target_c)
-        sequences = generate_sequences_with_rings(
-            model=model,
-            tokenizer=tokenizer,
-            num_sequences=args.num_sequences,
-            target_rings=target_c,  # 直接使用实际C数量
-            temperature=args.temperature,
-            max_length=MAX_SEQUENCE_LENGTH,
-            device=DEVICE
-        )
-        unique_seqs = set(sequences)
-        logger.info(f"目标C数量{target_c}: 采样{args.num_sequences}次，unique序列数: {len(unique_seqs)}，unique比例: {len(unique_seqs)/args.num_sequences:.2f}")
-        for i, seq in enumerate(unique_seqs, 1):
-            print(f">C{target_c}_Sample{i}\n{seq}")
-
-    # 以3环为例，采样极端z并分析多样性
-    sample_with_various_z(model, tokenizer, num_sequences=100, ring_info_value=0, device=DEVICE, sampling=args.sampling, temperature=args.temperature)
-    # 如需softmax采样：
-    # sample_with_various_z(model, tokenizer, num_sequences=100, ring_info_value=0, device=DEVICE, sampling='softmax', temperature=1.2)
+    logger.info("开始训练集扰动生成...")
+    model, tokenizer = load_model(args.model_path)
 
     # 加载数据集
     data = torch.load(EMBEDDING_FILE)
@@ -713,13 +662,11 @@ def main():
         embeddings = [item['embeddings'] for item in data]
         embeddings = torch.stack(embeddings)
     dataset = ProteinDataset(sequences=sequences, embeddings=embeddings, tokenizer=tokenizer, max_length=MAX_SEQUENCE_LENGTH)
-    # ====== 只保留VAE闭环自检 ======
-    vae_reconstruction_selfcheck(model, tokenizer, dataset, DEVICE)
-    # ====== 新增z空间可视化 ======
-    visualize_z_space(model, dataset, DEVICE, method='pca', save_path='z_space_pca.png')
-    visualize_z_space(model, dataset, DEVICE, method='tsne', save_path='z_space_tsne.png')
-    # # 直接对训练集每个样本z_mean扰动生成10条新序列（多组epsilon_std）
-    # generate_perturbed_for_all_train(model, tokenizer, dataset, DEVICE, num_per_sample=10, epsilon_stds=[0.001, 0.005, 0.01], temperature=1.0)
+
+    # 直接调用，无需外部参数
+    generate_perturbed_for_all_train(
+        model, tokenizer, dataset, DEVICE
+    )
 
 if __name__ == "__main__":
     main() 

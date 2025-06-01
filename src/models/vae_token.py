@@ -77,6 +77,8 @@ class ESMVAEToken(nn.Module):
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=2)
         self.latent_to_memory = nn.Linear(latent_dim, rnn_hidden_dim)
         self.fc_out = nn.Linear(rnn_hidden_dim, vocab_size)
+        # 位置编码
+        self.pos_embedding = nn.Embedding(self.max_sequence_length, self.rnn_hidden_dim)
         # 特殊token IDs
         self.sos_token_id = 0
         self.eos_token_id = 2
@@ -168,7 +170,7 @@ class ESMVAEToken(nn.Module):
         eps = torch.randn_like(std)
         return mu + eps * std
     
-    def decode(self, z: torch.Tensor, target_ids: Optional[torch.Tensor] = None, gumbel_softmax: bool = False, scheduled_sampling_prob: float = 0.1) -> torch.Tensor:
+    def decode(self, z: torch.Tensor, target_ids: Optional[torch.Tensor] = None, gumbel_softmax: bool = False, scheduled_sampling_prob: float = 0.1, temperature: float = 1.0) -> torch.Tensor:
         batch_size = z.size(0)
         device = z.device
         memory = self.latent_to_memory(z).unsqueeze(1)  # [B, 1, d_model]
@@ -192,19 +194,25 @@ class ESMVAEToken(nn.Module):
                     if torch.rand(1).item() < scheduled_sampling_prob:
                         prev_inputs = decoder_input_ids_ss[:, :t]
                         prev_emb = self.decoder_embedding(prev_inputs)
+                        # 加入位置编码
+                        positions = torch.arange(prev_emb.size(1), device=device).unsqueeze(0).expand(batch_size, -1)
+                        prev_emb = prev_emb + self.pos_embedding(positions)
                         tgt_mask = nn.Transformer.generate_square_subsequent_mask(t).to(device)
                         out = self.transformer_decoder(
                             tgt=prev_emb,
                             memory=memory.expand(batch_size, -1, -1),
                             tgt_mask=tgt_mask
                         )
-                        logits = self.fc_out(out[:, -1:])
+                        logits = self.fc_out(out[:, -1])
                         pred_token = logits.argmax(dim=-1)
                         not_pad = decoder_input_ids_ss[:, t] != self.pad_token_id
-                        decoder_input_ids_ss[not_pad, t] = pred_token.squeeze(1)[not_pad]
+                        decoder_input_ids_ss[not_pad, t] = pred_token[not_pad]
                 decoder_input_ids = decoder_input_ids_ss
             # embedding
             tgt_emb = self.decoder_embedding(decoder_input_ids)
+            # 加入位置编码
+            positions = torch.arange(tgt_emb.size(1), device=device).unsqueeze(0).expand(batch_size, -1)
+            tgt_emb = tgt_emb + self.pos_embedding(positions)
             tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_emb.size(1)).to(device)
             out = self.transformer_decoder(
                 tgt=tgt_emb,
@@ -213,40 +221,36 @@ class ESMVAEToken(nn.Module):
             )
             logits = self.fc_out(out)
             # ====== DEBUG PRINT（teacher forcing重构）======
-            print("[DEBUG] target_ids[0]:", target_ids[0].detach().cpu().tolist())
-            print("[DEBUG] decoder_input_ids[0]:", decoder_input_ids[0].detach().cpu().tolist())
-            print("[DEBUG] logits.argmax(-1)[0]:", logits[0].argmax(-1).detach().cpu().tolist())
-            if batch_size > 1:
-                print("[DEBUG] target_ids[1]:", target_ids[1].detach().cpu().tolist())
-                print("[DEBUG] decoder_input_ids[1]:", decoder_input_ids[1].detach().cpu().tolist())
-                print("[DEBUG] logits.argmax(-1)[1]:", logits[1].argmax(-1).detach().cpu().tolist())
+            # print("[DEBUG] target_ids[0]:", target_ids[0].detach().cpu().tolist())
+            # print("[DEBUG] decoder_input_ids[0]:", decoder_input_ids[0].detach().cpu().tolist())
+            # print("[DEBUG] logits.argmax(-1)[0]:", logits[0].argmax(-1).detach().cpu().tolist())
+            # if batch_size > 1:
+            #     print("[DEBUG] target_ids[1]:", target_ids[1].detach().cpu().tolist())
+            #     print("[DEBUG] decoder_input_ids[1]:", decoder_input_ids[1].detach().cpu().tolist())
+            #     print("[DEBUG] logits.argmax(-1)[1]:", logits[1].argmax(-1).detach().cpu().tolist())
             # ====== END DEBUG PRINT ======
             return logits
         else:
-            # 自回归生成
+            # 自回归生成（softmax采样）
             generated = torch.full((batch_size, 1), self.sos_token_id, dtype=torch.long, device=device)
             finished = torch.zeros(batch_size, dtype=torch.bool, device=device)
             for t in range(max_len):
                 tgt_emb = self.decoder_embedding(generated)
+                positions = torch.arange(tgt_emb.size(1), device=device).unsqueeze(0).expand(batch_size, -1)
+                tgt_emb = tgt_emb + self.pos_embedding(positions)
                 tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_emb.size(1)).to(device)
                 out = self.transformer_decoder(
                     tgt=tgt_emb,
                     memory=memory.expand(batch_size, -1, -1),
                     tgt_mask=tgt_mask
                 )
-                logits = self.fc_out(out[:, -1:])
-                next_token = logits.argmax(dim=-1)
+                logits = self.fc_out(out[:, -1])  # [B, vocab_size]
+                probs = torch.softmax(logits / temperature, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)  # [B, 1]
                 generated = torch.cat([generated, next_token], dim=1)
-                # ====== DEBUG PRINT（自回归生成）======
-                print(f"[DEBUG] t={t}, next_token[0]:", next_token[0].item(), "generated[0]:", generated[0].detach().cpu().tolist())
-                if batch_size > 1:
-                    print(f"[DEBUG] t={t}, next_token[1]:", next_token[1].item(), "generated[1]:", generated[1].detach().cpu().tolist())
-                # ====== END DEBUG PRINT ======
-                # 检查eos/pad
                 finished = finished | (next_token.squeeze(1) == self.eos_token_id) | (next_token.squeeze(1) == self.pad_token_id)
                 if finished.all():
                     break
-            # 去掉sos
             return generated[:, 1:]
     
     def forward(

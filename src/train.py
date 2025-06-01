@@ -85,6 +85,7 @@ def train_epoch(
     sum_loss = 0
     sum_recon_loss = 0
     sum_kld_loss = 0
+    sum_kld_raw_mean = 0
     for batch_idx, batch in enumerate(train_loader):
         embeddings = batch['embeddings'].to(device)
         input_ids = batch['input_ids'].to(device)
@@ -101,15 +102,18 @@ def train_epoch(
         sum_loss += loss.item() if isinstance(loss, torch.Tensor) else loss
         sum_recon_loss += recon_loss.item() if isinstance(recon_loss, torch.Tensor) else recon_loss
         sum_kld_loss += kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss
+        sum_kld_raw_mean += kld_raw_mean
         if batch_idx % 10 == 0:
             print(f'Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} ({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
     avg_loss = sum_loss / len(train_loader)
     avg_recon_loss = sum_recon_loss / len(train_loader)
     avg_kld_loss = sum_kld_loss / len(train_loader)
+    avg_kld_raw_mean = sum_kld_raw_mean / len(train_loader)
     return {
         'loss': avg_loss,
         'recon_loss': avg_recon_loss,
-        'kld_loss': avg_kld_loss
+        'kld_loss': avg_kld_loss,
+        'kld_raw_mean': avg_kld_raw_mean
     }
 
 def validate(
@@ -137,6 +141,7 @@ def validate(
     total_loss = 0
     total_recon_loss = 0
     total_kld_loss = 0
+    total_kld_raw_mean = 0
     with torch.no_grad():
         for batch_idx, batch in enumerate(val_loader):
             embeddings = batch['embeddings'].to(device)
@@ -151,14 +156,17 @@ def validate(
             total_loss += loss.item() if isinstance(loss, torch.Tensor) else loss
             total_recon_loss += recon_loss.item() if isinstance(recon_loss, torch.Tensor) else recon_loss
             total_kld_loss += kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss
+            total_kld_raw_mean += kld_raw_mean
     num_batches = len(val_loader)
     avg_loss = total_loss / num_batches
     avg_recon_loss = total_recon_loss / num_batches
     avg_kld_loss = total_kld_loss / num_batches
+    avg_kld_raw_mean = total_kld_raw_mean / num_batches
     return {
         'loss': avg_loss,
         'recon_loss': avg_recon_loss,
-        'kld_loss': avg_kld_loss
+        'kld_loss': avg_kld_loss,
+        'kld_raw_mean': avg_kld_raw_mean
     }
 
 def save_checkpoint(
@@ -272,12 +280,14 @@ def main(args=None):
     pad_token_id = tokenizer.pad_token_id
     logger.info(f"ESM tokenizer词汇表大小: {vocab_size}")
     logger.info(f"ESM tokenizer pad token ID: {pad_token_id}")
-    # ====== 断言特殊token id一致性 ======
+    # ====== 若无bos_token_id则补充为0 ======
+    if not hasattr(tokenizer, 'bos_token_id') or tokenizer.bos_token_id is None:
+        tokenizer.bos_token_id = 0
+    # ====== 断言特殊token id一致性（只检查pad/eos） ======
     assert tokenizer.pad_token_id == pad_token_id, f"pad_token_id不一致: {tokenizer.pad_token_id} vs {pad_token_id}"
     assert hasattr(tokenizer, 'eos_token_id') and tokenizer.eos_token_id == 2, f"eos_token_id不一致: {getattr(tokenizer, 'eos_token_id', None)} vs 2"
-    assert hasattr(tokenizer, 'bos_token_id') and tokenizer.bos_token_id == 0, f"sos_token_id不一致: {getattr(tokenizer, 'bos_token_id', None)} vs 0"
     
-    scheduled_sampling_prob = 0.7  # 固定为0.7，部分teacher forcing
+    scheduled_sampling_prob = 0.3  # 初始值，后续动态调整
     print(f"\n===== Scheduled Sampling概率: {scheduled_sampling_prob} =====")
     # 重新初始化模型和优化器，保证每轮独立
     model = ESMVAEToken(
@@ -291,6 +301,8 @@ def main(args=None):
         dropout=args.dropout,
         rnn_hidden_dim=RNN_HIDDEN_DIM
     ).to(torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+    # ====== 保证model.sos_token_id与tokenizer.bos_token_id一致 ======
+    model.sos_token_id = tokenizer.bos_token_id
     optimizer = optim.AdamW(
         model.parameters(),
         lr=args.lr,
@@ -300,11 +312,18 @@ def main(args=None):
     val_loss_history = []
     best_val_loss = float('inf')
     epochs_no_improve = 0
-    patience = 20  # 早停容忍轮数
+    patience = 30  # 早停容忍轮数，延长到30轮
     min_delta = 1e-3  # 最小提升幅度
     for epoch in range(1000):  # 训练1000轮
-        beta = 0.001  # KL loss权重设为0.001
+        # 动态调整scheduled_sampling_prob
+        if epoch < 10:
+            scheduled_sampling_prob = 0.3
+        elif epoch < 20:
+            scheduled_sampling_prob = 0.5
+        elif len(val_loss_history) > 0 and val_loss_history[-1] < 1.3:
+            scheduled_sampling_prob = 0.7
         print(f"[SS={scheduled_sampling_prob}] Epoch {epoch+1}")
+        beta = 0  # KL loss权重设为0，彻底关闭KL
         train_losses = train_epoch(
             model=model,
             train_loader=train_loader,
@@ -325,7 +344,9 @@ def main(args=None):
         )
         train_loss_history.append(train_losses['loss'])
         val_loss_history.append(val_losses['loss'])
-        print(f"[SS={scheduled_sampling_prob}] Epoch {epoch+1} train_loss={train_losses['loss']:.4f}, val_loss={val_losses['loss']:.4f}")
+        print(f"[SS={scheduled_sampling_prob}] Epoch {epoch+1} train_loss={train_losses['loss']:.4f}, val_loss={val_losses['loss']:.4f}, "
+              f"train_kld={train_losses['kld_loss']:.4f}, val_kld={val_losses['kld_loss']:.4f}, "
+              f"train_kld_raw={train_losses['kld_raw_mean']:.4f}, val_kld_raw={val_losses['kld_raw_mean']:.4f}")
         # 自动保存当前checkpoint
         save_checkpoint(
             model,
