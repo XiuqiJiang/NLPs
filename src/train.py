@@ -62,7 +62,8 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     epoch: int,
     device: torch.device,
-    pad_token_id: int
+    pad_token_id: int,
+    beta: float
 ) -> Dict[str, float]:
     """训练一个epoch
     
@@ -73,6 +74,7 @@ def train_epoch(
         epoch: 当前训练轮次
         device: 训练设备
         pad_token_id: padding token的ID
+        beta: KL散度权重
         
     Returns:
         包含训练损失的字典
@@ -81,68 +83,39 @@ def train_epoch(
     sum_loss = 0
     sum_recon_loss = 0
     sum_kld_loss = 0
-    sum_ring_loss = 0
-    kld_target_epoch = 0
-    free_bits_kld_mean_sum = 0
-    sum_kld_raw_mean = 0
-    
     for batch_idx, batch in enumerate(train_loader):
         embeddings = batch['embeddings'].to(device)
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
-        ring_info = batch['ring_info'].to(device)
-        # 直接全部作为条件VAE处理
-        logits, _, mu, logvar, ring_pred = model(
-            embeddings, attention_mask, input_ids, ring_info
+        logits, _, mu, logvar = model(
+            embeddings, attention_mask, input_ids
         )
-        loss, recon_loss, kld_loss, ring_loss, kld_target, free_bits_kld_mean, kld_raw_mean = vae_token_loss(
-            logits, input_ids, mu, logvar, ring_pred, ring_info, epoch, pad_token_id
+        loss, recon_loss, _, kld_loss, kld_raw_mean = vae_token_loss(
+            logits, input_ids, mu, logvar, epoch, pad_token_id, beta=beta
         )
         optimizer.zero_grad()
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)  # 暂时注释，防止NameError
         loss.backward()
         optimizer.step()
-        # 累加损失
         sum_loss += loss.item() if isinstance(loss, torch.Tensor) else loss
         sum_recon_loss += recon_loss.item() if isinstance(recon_loss, torch.Tensor) else recon_loss
         sum_kld_loss += kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss
-        sum_ring_loss += ring_loss.item() if isinstance(ring_loss, torch.Tensor) else ring_loss
-        # 新增统计 kld_target 和 free_bits_kld_mean
-        if batch_idx == 0:
-            kld_target_epoch = kld_target
-        if batch_idx == 0:
-            free_bits_kld_mean_sum = 0
-        free_bits_kld_mean_sum = free_bits_kld_mean_sum + (free_bits_kld_mean.item() if isinstance(free_bits_kld_mean, torch.Tensor) else free_bits_kld_mean)
-        sum_kld_raw_mean += kld_raw_mean.item() if isinstance(kld_raw_mean, torch.Tensor) else kld_raw_mean
-        # 打印进度
         if batch_idx % 10 == 0:
-            print(f'Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} '
-                  f'({100. * batch_idx / len(train_loader):.0f}%)]\t'
-                  f'Loss: {loss.item():.6f}')
-    
-    # 计算平均损失
+            print(f'Train Epoch: {epoch} [{batch_idx}/{len(train_loader)} ({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
     avg_loss = sum_loss / len(train_loader)
     avg_recon_loss = sum_recon_loss / len(train_loader)
     avg_kld_loss = sum_kld_loss / len(train_loader)
-    avg_ring_loss = sum_ring_loss / len(train_loader)
-    avg_free_bits_kld_mean = free_bits_kld_mean_sum / len(train_loader)
-    avg_kld_raw_mean = sum_kld_raw_mean / len(train_loader)
-    
     return {
         'loss': avg_loss,
         'recon_loss': avg_recon_loss,
-        'kld_loss': avg_kld_loss,
-        'ring_loss': avg_ring_loss,
-        'kld_target': kld_target_epoch,
-        'free_bits_kld_mean': avg_free_bits_kld_mean,
-        'kld_raw_mean': avg_kld_raw_mean
+        'kld_loss': avg_kld_loss
     }
 
 def validate(
     model: nn.Module,
     val_loader: DataLoader,
     device: torch.device,
-    pad_token_id: int
+    pad_token_id: int,
+    beta: float
 ) -> Dict[str, float]:
     """验证模型
     
@@ -151,6 +124,7 @@ def validate(
         val_loader: 验证数据加载器
         device: 设备
         pad_token_id: padding token的ID
+        beta: KL散度权重
         
     Returns:
         损失字典
@@ -159,57 +133,28 @@ def validate(
     total_loss = 0
     total_recon_loss = 0
     total_kld_loss = 0
-    total_ring_loss = 0
-    total_kld_raw_mean = 0
     with torch.no_grad():
         for batch_idx, batch in enumerate(val_loader):
             embeddings = batch['embeddings'].to(device)
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
-            ring_info = batch['ring_info'].to(device)
-            # 数据检查
-            if (torch.isnan(embeddings).any() or torch.isinf(embeddings).any() or
-                torch.isnan(input_ids.float()).any() or torch.isinf(input_ids.float()).any() or
-                torch.isnan(ring_info.float()).any() or torch.isinf(ring_info.float()).any()):
-                print(f"[Val数据异常] batch {batch_idx}: nan/inf detected! 跳过该batch。")
-                print(f"embeddings nan: {torch.isnan(embeddings).any().item()}, inf: {torch.isinf(embeddings).any().item()}")
-                print(f"input_ids nan: {torch.isnan(input_ids.float()).any().item()}, inf: {torch.isinf(input_ids.float()).any().item()}")
-                print(f"ring_info nan: {torch.isnan(ring_info.float()).any().item()}, inf: {torch.isinf(ring_info.float()).any().item()}")
-                continue
-            # 极端值检查
-            if (embeddings.abs().max() > 1e4 or input_ids.abs().max() > 1e6 or ring_info.abs().max() > 1e3):
-                print(f"[Val数据异常] batch {batch_idx}: 极端值 detected! 跳过该batch。")
-                print(f"embeddings min: {embeddings.min().item()}, max: {embeddings.max().item()}")
-                print(f"input_ids min: {input_ids.min().item()}, max: {input_ids.max().item()}")
-                print(f"ring_info min: {ring_info.min().item()}, max: {ring_info.max().item()}")
-                continue
-            # 直接全部作为条件VAE处理
-            logits, _, mu, logvar, ring_pred = model(
-                embeddings, attention_mask, input_ids, ring_info
+            logits, _, mu, logvar = model(
+                embeddings, attention_mask, input_ids
             )
-            loss, recon_loss, kld_loss, ring_loss, kld_target, free_bits_kld_mean, kld_raw_mean = vae_token_loss(
-                logits, input_ids, mu, logvar, ring_pred, ring_info, epoch=0, pad_token_id=pad_token_id
+            loss, recon_loss, _, kld_loss, kld_raw_mean = vae_token_loss(
+                logits, input_ids, mu, logvar, epoch=0, pad_token_id=pad_token_id, beta=beta
             )
             total_loss += loss.item() if isinstance(loss, torch.Tensor) else loss
             total_recon_loss += recon_loss.item() if isinstance(recon_loss, torch.Tensor) else recon_loss
             total_kld_loss += kld_loss.item() if isinstance(kld_loss, torch.Tensor) else kld_loss
-            total_ring_loss += ring_loss.item() if isinstance(ring_loss, torch.Tensor) else ring_loss
-            total_kld_raw_mean += kld_raw_mean.item() if isinstance(kld_raw_mean, torch.Tensor) else kld_raw_mean
     num_batches = len(val_loader)
     avg_loss = total_loss / num_batches
     avg_recon_loss = total_recon_loss / num_batches
     avg_kld_loss = total_kld_loss / num_batches
-    avg_ring_loss = total_ring_loss / num_batches
-    avg_free_bits_kld_mean = free_bits_kld_mean / len(val_loader)
-    avg_kld_raw_mean = total_kld_raw_mean / len(val_loader)
     return {
         'loss': avg_loss,
         'recon_loss': avg_recon_loss,
-        'kld_loss': avg_kld_loss,
-        'ring_loss': avg_ring_loss,
-        'kld_target': kld_target,
-        'free_bits_kld_mean': avg_free_bits_kld_mean,
-        'kld_raw_mean': avg_kld_raw_mean
+        'kld_loss': avg_kld_loss
     }
 
 def save_checkpoint(
@@ -335,8 +280,7 @@ def main(args=None):
         pad_token_id=pad_token_id,
         use_layer_norm=True,
         dropout=args.dropout,
-        num_classes=3,  # 只支持3C,4C,5C
-        rnn_hidden_dim=RNN_HIDDEN_DIM  # 显式指定RNN隐藏层维度
+        rnn_hidden_dim=RNN_HIDDEN_DIM
     ).to(device)
     
     # 初始化优化器
@@ -359,7 +303,11 @@ def main(args=None):
     best_val_loss = float('inf')
     epochs_no_improve = 0  # 记录val_loss未提升的轮数
     for epoch in range(args.epochs):
-        beta = get_beta(epoch, max_beta=MAX_BETA, warmup_epochs=WARMUP_EPOCHS)
+        # beta调度：前100轮为0，之后线性递增到0.01
+        if epoch < 100:
+            beta = 0.0
+        else:
+            beta = min(0.01, 0.01 * (epoch - 99) / max(1, args.epochs - 100))
         print(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
         logging.info(f"[Epoch {epoch+1}] 当前beta: {beta:.6f}")
         
@@ -370,7 +318,8 @@ def main(args=None):
             optimizer=optimizer,
             epoch=epoch,
             device=device,
-            pad_token_id=pad_token_id
+            pad_token_id=pad_token_id,
+            beta=beta
         )
         
         # 验证
@@ -378,7 +327,8 @@ def main(args=None):
             model=model,
             val_loader=val_loader,
             device=device,
-            pad_token_id=pad_token_id
+            pad_token_id=pad_token_id,
+            beta=beta
         )
         
         # 记录损失历史
@@ -390,26 +340,8 @@ def main(args=None):
         val_kld_history.append(val_losses['kld_loss'])
         
         # 打印损失
-        print(f"[Epoch {epoch+1}] train_loss={train_losses['loss']:.4f}, train_recon={train_losses['recon_loss']:.4f}, train_kld={train_losses['kld_loss']:.4f}, train_ring_loss={train_losses['ring_loss']:.4f}, train_kld_raw_mean={train_losses['kld_raw_mean']:.4f}, beta={beta:.4f}")
-        print(f"[Epoch {epoch+1}] val_loss={val_losses['loss']:.4f}, val_recon={val_losses['recon_loss']:.4f}, val_kld={val_losses['kld_loss']:.4f}, val_ring_loss={val_losses['ring_loss']:.4f}, val_kld_raw_mean={val_losses['kld_raw_mean']:.4f}, beta={beta:.4f}")
-        # 新增打印 kld_target 和 free_bits_kld_mean
-        print(f"[Epoch {epoch+1}] kld_target={train_losses['kld_target']:.6f}, free_bits_kld_mean={train_losses['free_bits_kld_mean']:.6f}")
-        logging.info(f"[Epoch {epoch+1}] kld_target={train_losses['kld_target']:.6f}, free_bits_kld_mean={train_losses['free_bits_kld_mean']:.6f}, kld_raw_mean={train_losses['kld_raw_mean']:.6f}, beta={beta:.4f}")
-        # 记录损失和log_var统计信息
-        logging.info(
-            f"Train - Loss: {train_losses['loss']:.4f}, "
-            f"Recon: {train_losses['recon_loss']:.4f}, "
-            f"KLD: {train_losses['kld_loss']:.4f}, "
-            f"KLD_raw_mean: {train_losses['kld_raw_mean']:.4f}, Beta: {beta:.4f}\n"
-            f"Train ring_loss: {train_losses['ring_loss']:.4f}"
-        )
-        logging.info(
-            f"Val - Loss: {val_losses['loss']:.4f}, "
-            f"Recon: {val_losses['recon_loss']:.4f}, "
-            f"KLD: {val_losses['kld_loss']:.4f}, "
-            f"KLD_raw_mean: {val_losses['kld_raw_mean']:.4f}, Beta: {beta:.4f}\n"
-            f"Val ring_loss: {val_losses['ring_loss']:.4f}"
-        )
+        print(f"[Epoch {epoch+1}] train_loss={train_losses['loss']:.4f}, train_recon={train_losses['recon_loss']:.4f}, train_kld={train_losses['kld_loss']:.4f}")
+        print(f"[Epoch {epoch+1}] val_loss={val_losses['loss']:.4f}, val_recon={val_losses['recon_loss']:.4f}, val_kld={val_losses['kld_loss']:.4f}")
         
         # 保存最佳模型
         if val_losses['loss'] < best_val_loss:
@@ -467,6 +399,33 @@ def main(args=None):
     plt.tight_layout()
     plt.savefig('loss_curve.png')
     print('损失曲线已保存为 loss_curve.png')
+
+    # ====== 极简推理脚本示例：z扰动生成 ======
+    print("\n===== 极简推理脚本：z扰动生成相似序列 =====")
+    model.eval()
+    # 取训练集第一个batch第一个样本
+    batch = next(iter(train_loader))
+    embeddings = batch['embeddings'][0:1].to(device)
+    input_ids = batch['input_ids'][0:1].to(device)
+    attention_mask = batch['attention_mask'][0:1].to(device)
+    # 编码得到mu
+    with torch.no_grad():
+        mu, logvar = model.encode(embeddings, attention_mask)
+        orig_seq = input_ids[0].cpu().tolist()
+        print("原始序列:", orig_seq)
+        for i, std in enumerate([0.0, 0.002, 0.005, 0.01]):
+            z_new = mu + torch.randn_like(mu) * std
+            gen_ids = model.decode(z_new)
+            gen_seq = gen_ids[0].cpu().tolist()
+            # 计算编辑距离和差异位置
+            def simple_edit_distance(a, b):
+                # 只支持等长序列，统计不相等的token数
+                return sum(x != y for x, y in zip(a, b))
+            edit_dist = simple_edit_distance(orig_seq, gen_seq)
+            diff_pos = [i for i, (x, y) in enumerate(zip(orig_seq, gen_seq)) if x != y]
+            print(f"扰动std={std:.4f} 生成: {gen_seq}")
+            print(f"  编辑距离: {edit_dist}，差异位置: {diff_pos}")
+    print("===== 推理脚本结束 =====\n")
 
 if __name__ == '__main__':
     # 创建命令行参数解析器
