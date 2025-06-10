@@ -541,13 +541,17 @@ def local_perturbation_experiment(model, tokenizer, dataset, device, num_per_cla
                     print(f"  [扰动std={eps:.4f}, temp={temp:.2f}] 生成: {gen_seq} | C数={c_count} | 编辑距离={ed}")
 
 def generate_perturbed_for_all_train(model, tokenizer, dataset, device):
-    """对训练集每个样本z_mean多组扰动、不同温度各生成5条新序列，输出原始与扰动序列及编辑距离统计"""
+    """对训练集每个样本z_mean多组扰动、不同温度各生成20条新序列，输出原始与扰动序列及编辑距离统计，并保存到文件"""
     sequences = dataset.sequences
     embeddings = dataset.embeddings
-    num_per_sample = 5
+    num_per_sample = 20  # 修改为每种情况生成20条
     epsilon_stds = [0.001, 0.005, 0.01]
     temperatures = [0.7, 1.0, 1.3]
     print(f"共{len(sequences)}条训练集样本，每条每扰动强度每温度生成{num_per_sample}条扰动序列...")
+
+    # 新增：收集所有生成的序列及相关信息
+    all_results = []
+
     for epsilon_std in epsilon_stds:
         print(f"\n==== 当前扰动强度 epsilon_std={epsilon_std} ====")
         for temp in temperatures:
@@ -574,12 +578,32 @@ def generate_perturbed_for_all_train(model, tokenizer, dataset, device):
                     ed = Levenshtein.distance(seq, gen_seq)
                     all_edit_distances.append(ed)
                     print(f"  [扰动{j+1}] 生成: {gen_seq} | 编辑距离: {ed}")
+                    # 新增：保存本条结果
+                    all_results.append({
+                        'original_seq': seq,
+                        'epsilon_std': epsilon_std,
+                        'temperature': temp,
+                        'perturb_id': j+1,
+                        'generated_seq': gen_seq,
+                        'edit_distance': ed
+                    })
             # 输出本组扰动的编辑距离统计
             if all_edit_distances:
                 avg_ed = np.mean(all_edit_distances)
                 max_ed = np.max(all_edit_distances)
                 min_ed = np.min(all_edit_distances)
                 print(f"\n[扰动std={epsilon_std}, temp={temp}] 全部扰动样本的编辑距离: 平均={avg_ed:.2f}，最小={min_ed}，最大={max_ed}")
+
+    # 新增：保存所有结果到TSV文件，路径固定为./results/perturbed_sequences.tsv
+    save_path = './results/perturbed_sequences.tsv'
+    output_dir = os.path.dirname(save_path)
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+    with open(save_path, 'w', encoding='utf-8') as f:
+        f.write('original_seq\tepsilon_std\ttemperature\tperturb_id\tgenerated_seq\tedit_distance\n')
+        for item in all_results:
+            f.write(f"{item['original_seq']}\t{item['epsilon_std']}\t{item['temperature']}\t{item['perturb_id']}\t{item['generated_seq']}\t{item['edit_distance']}\n")
+    print(f"\n所有扰动生成的序列已保存到: {save_path}")
 
 def vae_reconstruction_selfcheck(model, tokenizer, dataset, device):
     """
